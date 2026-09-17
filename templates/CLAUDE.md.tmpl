@@ -1,0 +1,26 @@
+# {{PROJECT}}
+
+Bu dosya `omk init` ile oluşturuldu ({{CREATED_AT}}). Proje tipi: **{{PTYPE}}**, deploy runner: **{{DEPLOY_RUNNER}}**.
+
+## Oturum başlangıcı
+1. `/omerkara-sdlc` skill'ini çalıştır (TASK_PROJECT=`{{PROJECT}}`).
+2. `docs/PROMPT.md` ve `docs/SCOPE.md` dosyalarını oku; Task API'deki sürüm esas alınır.
+3. Açık task'ları listele ve kullanıcıyla hangisinden başlanacağını netleştir.
+
+## Task yönetimi
+- API: `{{TASK_API}}` — header: `X-Task-Token: $TASK_TOKEN`
+- Güncel API spesifikasyonu: https://tasks.omerkara.com/task-management.md
+- Yeni iş çıktığında hemen task aç; durum değiştiğinde hemen güncelle.
+- PROMPT, SCOPE, ARCHITECTURE, DEPLOYMENT ve tasarım dokümanlarında yapılan her değişikliği `POST /documents/upsert` ile Task API'ye gönder.
+- Görseller ve tasarım çıktıları `docs/assets/` altında tutulur; ilgili doküman içinde referans verilir.
+- `task_mcp` MCP sunucusu varsa HTTP çağrısı yerine onun araçlarını kullan.
+
+## Deploy
+- Deploy işlemleri **yalnızca orchestrator** üzerinden yapılır; bu repoda fastlane, sertifika veya SSH anahtarı tutulmaz.
+- Hedef tanımı: `deploy.yml`. Runner: `{{DEPLOY_RUNNER}}`.
+- Tetikleme: `main` dalına push → GitHub webhook → orchestrator.
+- Deploy yapılandırmasındaki değişiklikler `DEPLOYMENT` dokümanına da yansıtılır.
+
+## Güvenlik
+- Token ve parolalar asla commit edilmez. Makine credential'ları `~/.config/omerkara/credentials` içindedir.
+- `.env` gitignore'dadır; yeni değişken eklendiğinde `.env.example` de güncellenir.

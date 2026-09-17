@@ -1,0 +1,5 @@
+# Kurulacak skill'ler — biçim: ad|git_url|zorunlu(yes/no)
+# Hedef: ~/.claude/skills/<ad>
+omerkara-sdlc|https://github.com/omerfkara/omerkara-sdlc.git|yes
+# Orchestrator için bir skill yazıldığında açın:
+# omerkara-deploy|https://github.com/omerfkara/omerkara-deploy.git|no

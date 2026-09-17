@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "task_mcp": {
+      "command": "{{OMK_VENV_PY}}",
+      "args": ["{{TASK_MCP_PATH}}"],
+      "env": {
+        "TASK_TOKEN": "${TASK_TOKEN}",
+        "TASK_API": "${TASK_API:-{{TASK_API}}}",
+        "TASK_PROJECT": "{{PROJECT}}"
+      }
+    }
+  }
+}

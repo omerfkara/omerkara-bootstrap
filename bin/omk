@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# omk — Ömer Kara proje bootstrap aracı
+# Kullanım: omk <setup|init|update|doctor|help> [...]
+set -euo pipefail
+
+# Gerçek konumu bul (symlink üzerinden çağrılsa da)
+SELF="$0"
+while [ -L "$SELF" ]; do
+  target="$(readlink "$SELF")"
+  case "$target" in /*) SELF="$target" ;; *) SELF="$(dirname "$SELF")/$target" ;; esac
+done
+BOOT_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+. "$BOOT_DIR/lib/common.sh"
+TPL="$BOOT_DIR/templates"
+OMK_VENV="$OMK_HOME/venv"
+TASK_MCP_DIR="$OMK_HOME/task-mcp"
+SHELL_MARK="# >>> omerkara credentials >>>"
+
+usage() {
+  cat <<USAGE
+omk — proje bootstrap aracı
+
+Komutlar:
+  omk setup                 Bu makineyi hazırlar (token'lar, skill'ler, MCP, shell ayarı)
+  omk init <proje> [opsiyonlar]
+                            Yeni proje oluşturur ya da mevcut projeyi bu makineye bağlar
+  omk update                Bootstrap, skill'ler ve task-mcp'yi günceller
+  omk doctor [proje]        Bağımlılık, token ve API erişimini kontrol eder
+  omk help
+
+init opsiyonları:
+  --dir <yol>               Proje klasörü (varsayılan: ./<proje>)
+  --type <tip>              ios | android | flutter | web | api | cv | other  (varsayılan: other)
+  --github                  GitHub'da private repo açar (gh gerekli)
+  --no-remote               Task API / orchestrator'a hiçbir şey göndermez
+  --force                   Mevcut şablon dosyalarının üzerine yazar
+  --dry-run                 Yapılacakları gösterir, değişiklik yapmaz
+
+Ortam değişkenleri (opsiyonel):
+  TASK_API, ORCH_API, ORCH_REGISTER_PATH, OMK_GITHUB_USER
+  OMK_OP_TASK_TOKEN, OMK_OP_ORCH_TOKEN   1Password referansları (op://...)
+USAGE
+}
+
+# ---------------------------------------------------------------- setup
+cmd_setup() {
+  info "Makine: $(os_name)"
+  require_cmds git curl python3 perl
+  has claude || warn "Claude Code (claude) bulunamadı → https://docs.claude.com/claude-code"
+  has gh     || warn "gh bulunamadı (--github için gerekli) → $(install_hint gh)"
+
+  mkdir -p "$OMK_CONFIG_DIR" "$OMK_HOME"
+  chmod 700 "$OMK_CONFIG_DIR"
+  load_credentials
+
+  # --- Token'lar (ortamda varsa kaydedilir, yoksa 1Password / kullanıcıdan alınır)
+  ensure_token TASK_TOKEN "TASK_TOKEN (https://tasks.omerkara.com/login)" OMK_OP_TASK_TOKEN yes
+  ensure_token ORCH_TOKEN "ORCH_TOKEN (orchestrator, boş geçilebilir)" OMK_OP_ORCH_TOKEN no
+
+  # --- Makine config (secret olmayan)
+  if [ ! -f "$OMK_CONF_FILE" ]; then
+    run set_kv "$OMK_CONF_FILE" TASK_API "$TASK_API"
+    [ -n "${ORCH_API:-}" ] && run set_kv "$OMK_CONF_FILE" ORCH_API "$ORCH_API"
+    ok "Config yazıldı: $OMK_CONF_FILE"
+  fi
+
+  install_skills
+  install_task_mcp
+  install_shell_hook
+  install_cli_link
+  ok "Kurulum tamam. Yeni bir terminal açın (ya da: source ~/.$(basename "${SHELL:-bash}")rc)"
+}
+
+ensure_token() { # var prompt op_ref_var required
+  if has_kv "$OMK_CRED_FILE" "$1"; then ok "$1 kayıtlı"; return 0; fi
+  t="$(read_secret "$1" "$2" "$3")"
+  if [ -z "$t" ]; then
+    [ "$4" = "yes" ] && die "$1 alınamadı. Etkileşimsiz kurulumda ortam değişkeni olarak verin: $1=... omk setup"
+    dim "$1 atlandı"; return 0
+  fi
+  run set_kv "$OMK_CRED_FILE" "$1" "$t"; export "$1=$t"
+  ok "$1 kaydedildi ($OMK_CRED_FILE, chmod 600)"
+}
+
+install_skills() {
+  info "Skill'ler"
+  mkdir -p "$HOME/.claude/skills"
+  grep -vE '^\s*(#|$)' "$BOOT_DIR/skills.txt" | while IFS='|' read -r name url required; do
+    if ! sync_repo "$url" "$HOME/.claude/skills/$name"; then
+      [ "$required" = "yes" ] && warn "Zorunlu skill kurulamadı: $name"
+    fi
+  done
+}
+
+install_task_mcp() {
+  info "task-mcp"
+  sync_repo "https://github.com/$OMK_GITHUB_USER/task-mcp.git" "$TASK_MCP_DIR" || return 0
+  if [ ! -f "$TASK_MCP_DIR/task_mcp.py" ]; then
+    warn "task-mcp reposunda task_mcp.py yok (kod henüz push edilmemiş olabilir) — MCP adımı atlandı"
+    return 0
+  fi
+  if [ ! -x "$OMK_VENV/bin/python" ]; then
+    if has uv; then run uv venv -q "$OMK_VENV"; else run python3 -m venv "$OMK_VENV"; fi
+  fi
+  if [ -f "$TASK_MCP_DIR/requirements.txt" ]; then
+    if has uv; then run uv pip install -q --python "$OMK_VENV/bin/python" -r "$TASK_MCP_DIR/requirements.txt"
+    else run "$OMK_VENV/bin/pip" install -q -r "$TASK_MCP_DIR/requirements.txt"; fi
+  fi
+  ok "task-mcp hazır ($OMK_VENV)"
+}
+
+# Credential'ları shell açılışında export eder (Claude Code .mcp.json ${VAR} genişletmesi için)
+install_shell_hook() {
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    case "$rc" in
+      *zshrc)  [ -f "$rc" ] || [ "$(basename "${SHELL:-}")" = zsh ] || continue ;;
+      *bashrc) [ -f "$rc" ] || [ "$(basename "${SHELL:-}")" = bash ] || continue ;;
+    esac
+    if grep -qF "$SHELL_MARK" "$rc" 2>/dev/null; then dim "shell hook mevcut: $rc"; continue; fi
+    [ "${DRY_RUN:-0}" = "1" ] && { dim "[dry-run] hook ekle: $rc"; continue; }
+    cat >> "$rc" <<HOOK
+
+$SHELL_MARK
+for _f in "\$HOME/.config/omerkara/config" "\$HOME/.config/omerkara/credentials"; do
+  [ -f "\$_f" ] && { set -a; . "\$_f"; set +a; }
+done; unset _f
+case ":\$PATH:" in *":\$HOME/.local/bin:"*) ;; *) export PATH="\$HOME/.local/bin:\$PATH" ;; esac
+# <<< omerkara credentials <<<
+HOOK
+    ok "shell hook eklendi: $rc"
+  done
+}
+
+install_cli_link() {
+  mkdir -p "$HOME/.local/bin"
+  run ln -sf "$BOOT_DIR/bin/omk" "$HOME/.local/bin/omk"
+  ok "omk komutu: ~/.local/bin/omk"
+}
+
+# ---------------------------------------------------------------- init
+cmd_init() {
+  PROJECT=""; DIR=""; PTYPE="other"; GITHUB=0; REMOTE=1; FORCE=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir) DIR="$2"; shift 2 ;;
+      --type) PTYPE="$2"; shift 2 ;;
+      --github) GITHUB=1; shift ;;
+      --no-remote) REMOTE=0; shift ;;
+      --force) FORCE=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "Bilinmeyen opsiyon: $1" ;;
+      *) [ -z "$PROJECT" ] && PROJECT="$1" || die "Fazla argüman: $1"; shift ;;
+    esac
+  done
+  export DRY_RUN="${DRY_RUN:-0}"
+  [ -n "$PROJECT" ] || { usage; die "Proje adı gerekli."; }
+  echo "$PROJECT" | grep -Eq '^[a-z0-9][a-z0-9-]{1,48}$' \
+    || die "Geçersiz proje adı '$PROJECT' (küçük harf, rakam ve '-', 2-49 karakter)"
+
+  case "$PTYPE" in
+    ios|android|flutter) DEPLOY_RUNNER=macos ;;
+    web|cv)              DEPLOY_RUNNER=ubuntu ;;
+    api)                 DEPLOY_RUNNER=pi ;;
+    other)               DEPLOY_RUNNER=none ;;
+    *) die "Geçersiz --type: $PTYPE" ;;
+  esac
+
+  require_cmds git curl python3 perl
+  load_credentials
+  if ! has_kv "$OMK_CRED_FILE" TASK_TOKEN && [ -z "${TASK_TOKEN:-}" ]; then
+    warn "Bu makine henüz hazırlanmamış, önce 'omk setup' çalışıyor."
+    cmd_setup; load_credentials
+  fi
+
+  DIR="${DIR:-$PWD/$PROJECT}"
+  if [ "$DRY_RUN" = "1" ] && [ ! -d "$DIR" ]; then
+    DRY_TMP="$(mktemp -d)"; dim "[dry-run] klasör oluşturulmayacak: $DIR"
+  else
+    mkdir -p "$DIR"; DIR="$(cd "$DIR" && pwd)"
+  fi
+  info "Proje: $PROJECT  →  $DIR  (tip: $PTYPE, runner: $DEPLOY_RUNNER)"
+
+  export PROJECT PTYPE DEPLOY_RUNNER TASK_API ORCH_API
+  export OMK_VENV_PY="$OMK_VENV/bin/python"
+  export TASK_MCP_PATH="$TASK_MCP_DIR/task_mcp.py"
+  export CREATED_AT; CREATED_AT="$(date +%Y-%m-%d)"
+  export GITHUB_REPO="$OMK_GITHUB_USER/$PROJECT"
+
+  cd "${DRY_TMP:-$DIR}"
+  [ -d .git ] || run git init -q -b main 2>/dev/null || run git init -q
+
+  # --- Uzak dokümanlar varsa önce indir (ikinci makine senaryosu)
+  REMOTE_DOCS=""
+  if [ "$REMOTE" = "1" ] && [ -n "${TASK_TOKEN:-}" ]; then
+    pull_remote_docs || warn "Task API'den dokümanlar alınamadı."
+  fi
+
+  # --- Şablonlar
+  render_template "$TPL/CLAUDE.md.tmpl"          CLAUDE.md "$FORCE"
+  render_template "$TPL/PROMPT.md.tmpl"          docs/PROMPT.md 0
+  render_template "$TPL/SCOPE.md.tmpl"           docs/SCOPE.md 0
+  render_template "$TPL/env.example.tmpl"        .env.example "$FORCE"
+  render_template "$TPL/claude-settings.json.tmpl" .claude/settings.json "$FORCE"
+  if [ "$DEPLOY_RUNNER" != "none" ]; then
+    render_template "$TPL/deploy.yml.tmpl" deploy.yml "$FORCE"
+  fi
+  if [ -f "$TASK_MCP_PATH" ]; then
+    render_template "$TPL/mcp.json.tmpl" .mcp.json "$FORCE"
+  else
+    dim "task-mcp kurulu değil, .mcp.json atlandı"
+  fi
+  [ -f .env ] || { [ "$DRY_RUN" = "1" ] && dim "[dry-run] .env oluştur" || { cp .env.example .env; chmod 600 .env; ok "yazıldı: .env"; }; }
+
+  if [ "$DRY_RUN" != "1" ]; then
+    while IFS= read -r l; do ensure_line .gitignore "$l"; done < "$TPL/gitignore.tmpl"
+    ok ".gitignore güncellendi"
+  fi
+
+  # --- Uzak kayıtlar
+  if [ "$REMOTE" = "1" ]; then
+    push_docs
+    register_orchestrator
+    ensure_first_task
+  else
+    dim "--no-remote: uzak kayıtlar atlandı"
+  fi
+
+  [ "$GITHUB" = "1" ] && create_github_repo
+  [ -n "${DRY_TMP:-}" ] && rm -rf "$DRY_TMP"
+
+  echo
+  ok "$PROJECT hazır."
+  dim "cd \"$DIR\" && claude     # ardından: /omerkara-sdlc"
+}
+
+# Task API'de bu projenin dokümanları varsa docs/ altına indirir
+pull_remote_docs() {
+  resp="$(task_api GET "/documents?project=$(urlencode "$PROJECT")")" || return 1
+  REMOTE_DOCS="$(printf '%s' "$resp" | python3 "$BOOT_DIR/lib/docs.py" names)" || REMOTE_DOCS=""
+  [ -z "$REMOTE_DOCS" ] && { dim "Task API'de henüz doküman yok"; return 0; }
+  info "Task API'deki dokümanlar: $(echo $REMOTE_DOCS)"
+  [ "${DRY_RUN:-0}" = "1" ] && return 0
+  mkdir -p docs
+  printf '%s' "$resp" | python3 "$BOOT_DIR/lib/docs.py" write docs
+}
+
+# Yerelde olup uzakta olmayan dokümanları gönderir (uzaktakinin üzerine yazmaz)
+push_docs() {
+  [ -n "${TASK_TOKEN:-}" ] || { warn "TASK_TOKEN yok, dokümanlar gönderilmedi"; return 0; }
+  for n in PROMPT SCOPE; do
+    if printf '%s\n' $REMOTE_DOCS | grep -qx "$n"; then dim "uzakta mevcut: $n"; continue; fi
+    [ -f "docs/$n.md" ] || continue
+    body="$(python3 -c 'import json,sys;print(json.dumps({"project":sys.argv[1],"name":sys.argv[2],"content":open(sys.argv[3],encoding="utf-8").read()}))' "$PROJECT" "$n" "docs/$n.md")"
+    if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST /documents/upsert $n"; continue; fi
+    if task_api POST /documents/upsert "$body" >/dev/null; then ok "Task API'ye gönderildi: $n"
+    else warn "Doküman gönderilemedi: $n"; fi
+  done
+}
+
+# Proje ilk kez oluşturuluyorsa bir başlangıç task'ı açar
+ensure_first_task() {
+  [ -n "${TASK_TOKEN:-}" ] || return 0
+  [ -n "$REMOTE_DOCS" ] && return 0     # proje zaten vardı
+  existing="$(task_api GET "/tasks?project=$(urlencode "$PROJECT")&status=all" 2>/dev/null || echo '[]')"
+  if printf '%s' "$existing" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+if isinstance(d,dict): d=next((v for v in d.values() if isinstance(v,list)),[])
+sys.exit(0 if d else 1)' 2>/dev/null; then dim "Projede task'lar mevcut, başlangıç task'ı açılmadı"; return 0; fi
+  body="$(python3 -c 'import json,sys;print(json.dumps({"project":sys.argv[1],"title":"Proje kurulumu: PROMPT ve SCOPE dokümanlarını tamamla","priority":"high"}))' "$PROJECT")"
+  if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST /tasks/create"; return 0; fi
+  task_api POST /tasks/create "$body" >/dev/null && ok "Başlangıç task'ı açıldı" || warn "Task açılamadı"
+}
+
+register_orchestrator() {
+  [ "$DEPLOY_RUNNER" = "none" ] && return 0
+  if [ -z "${ORCH_API:-}" ] || [ -z "${ORCH_TOKEN:-}" ]; then
+    dim "ORCH_API/ORCH_TOKEN tanımlı değil — orchestrator kaydı atlandı (deploy.yml yine de yazıldı)"
+    return 0
+  fi
+  body="$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1],"type":sys.argv[2],"runner":sys.argv[3],"repo":sys.argv[4]}))' \
+    "$PROJECT" "$PTYPE" "$DEPLOY_RUNNER" "$GITHUB_REPO")"
+  if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_REGISTER_PATH"; return 0; fi
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$ORCH_API$ORCH_REGISTER_PATH" \
+    -H "Authorization: Bearer $ORCH_TOKEN" -H "Content-Type: application/json" \
+    --data-binary "$body" --max-time 20 || echo 000)"
+  case "$code" in
+    2??) ok "Orchestrator'a kaydedildi" ;;
+    409) dim "Orchestrator'da zaten kayıtlı" ;;
+    *)   warn "Orchestrator kaydı başarısız (HTTP $code)" ;;
+  esac
+}
+
+create_github_repo() {
+  has gh || { warn "gh yok, GitHub reposu açılmadı"; return 0; }
+  if gh repo view "$GITHUB_REPO" >/dev/null 2>&1; then
+    git remote get-url origin >/dev/null 2>&1 || run git remote add origin "https://github.com/$GITHUB_REPO.git"
+    dim "GitHub reposu zaten var: $GITHUB_REPO"
+  else
+    if ! git rev-parse HEAD >/dev/null 2>&1; then
+      run git add -A && run git commit -qm "chore: bootstrap $PROJECT"
+    fi
+    run gh repo create "$GITHUB_REPO" --private --source . --remote origin --push && ok "GitHub: $GITHUB_REPO"
+  fi
+  if [ -n "${ORCH_WEBHOOK_URL:-}" ] && [ -n "${ORCH_WEBHOOK_SECRET:-}" ]; then
+    if gh api "repos/$GITHUB_REPO/hooks" --jq '.[].config.url' 2>/dev/null | grep -qxF "$ORCH_WEBHOOK_URL"; then
+      dim "Webhook zaten var"
+    else
+      run gh api "repos/$GITHUB_REPO/hooks" -X POST -f name=web \
+        -f "config[url]=$ORCH_WEBHOOK_URL" -f "config[content_type]=json" \
+        -f "config[secret]=$ORCH_WEBHOOK_SECRET" -f "events[]=push" -F active=true >/dev/null \
+        && ok "Orchestrator webhook'u eklendi"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------- update
+cmd_update() {
+  info "Bootstrap"
+  sync_repo "https://github.com/$OMK_GITHUB_USER/omerkara-bootstrap.git" "$BOOT_DIR" || true
+  load_credentials
+  install_skills
+  install_task_mcp
+  ok "Güncelleme tamam"
+}
+
+# ---------------------------------------------------------------- doctor
+cmd_doctor() {
+  project="${1:-$(basename "$PWD")}"
+  load_credentials
+  fail=0
+  info "Bağımlılıklar"
+  for c in git curl python3 perl claude gh uv op; do
+    if has "$c"; then ok "$c"; else
+      case "$c" in git|curl|python3|perl) warn "$c eksik"; fail=1 ;; *) dim "$c yok (opsiyonel)" ;; esac
+    fi
+  done
+  info "Credential'lar"
+  [ -f "$OMK_CRED_FILE" ] && ok "$OMK_CRED_FILE" || { warn "credential dosyası yok → omk setup"; fail=1; }
+  [ -n "${TASK_TOKEN:-}" ] && ok "TASK_TOKEN" || { warn "TASK_TOKEN yok"; fail=1; }
+  [ -n "${ORCH_TOKEN:-}" ] && ok "ORCH_TOKEN" || dim "ORCH_TOKEN yok"
+  info "Skill / MCP"
+  [ -f "$HOME/.claude/skills/omerkara-sdlc/SKILL.md" ] && ok "omerkara-sdlc skill" || { warn "omerkara-sdlc skill yok"; fail=1; }
+  [ -f "$TASK_MCP_DIR/task_mcp.py" ] && ok "task-mcp" || dim "task-mcp yok"
+  info "Erişim"
+  if [ -n "${TASK_TOKEN:-}" ]; then
+    if task_api GET "/tasks?project=$(urlencode "$project")" >/dev/null 2>&1; then ok "Task API ($TASK_API)"
+    else warn "Task API'ye erişilemedi veya token geçersiz"; fail=1; fi
+  fi
+  if [ -n "${ORCH_API:-}" ]; then
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$ORCH_API/health" || echo 000)"
+    case "$code" in 2??) ok "Orchestrator ($ORCH_API)" ;; *) warn "Orchestrator /health → HTTP $code" ;; esac
+  fi
+  [ "$fail" = "0" ] && ok "Her şey yolunda" || die "Sorunlar var (yukarıya bakın)"
+}
+
+# ---------------------------------------------------------------- main
+cmd="${1:-help}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  setup)  cmd_setup "$@" ;;
+  init)   cmd_init "$@" ;;
+  update) cmd_update "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage; die "Bilinmeyen komut: $cmd" ;;
+esac

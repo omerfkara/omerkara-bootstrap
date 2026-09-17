@@ -1,0 +1,17 @@
+# Orchestrator deploy tanımı — {{PROJECT}}
+# Alan adları orchestrator şemasına göre uyarlanmalıdır.
+project: {{PROJECT}}
+repo: {{GITHUB_REPO}}
+type: {{PTYPE}}
+runner: {{DEPLOY_RUNNER}}        # macos | ubuntu | pi
+branch: main
+trigger: push
+
+environments:
+  staging:
+    branch: develop
+  production:
+    branch: main
+    approval: manual
+
+# Sertifika, SSH anahtarı ve store credential'ları orchestrator'da tutulur.
