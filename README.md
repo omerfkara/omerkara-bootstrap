@@ -89,6 +89,9 @@ Komut tekrar çalıştırılabilir; her çalıştırmada eksik olanı tamamlar.
   kırpar (birebir eşleşme gerektiği için önemli), **kaydetmeden önce** canlı bir
   çağrıyla doğrular. Doğrulama başarısızsa dosyaya dokunmaz; `--force` ile zorlanır.
   Etkileşimsiz: `OMK_TOKEN_VALUE=... omk token`.
+- Terminale iki kez yapıştırılan token birebir ikiye katlanır; yankı kapalı olduğu
+  için fark edilmez ve sunucu tarafındaki tam eşleşme sessizce başarısız olur.
+  `omk token` bunu tanır, tek kopyayı da dener ve doğrulanan değeri kaydeder.
 
 ## Yapılandırma
 

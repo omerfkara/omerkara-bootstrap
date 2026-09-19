@@ -461,15 +461,22 @@ cmd_token() {
   t="$(printf '%s' "$t" | tr -d '[:space:]')"
   [ -n "$t" ] || die "Token boş — değişiklik yapılmadı"
 
+  # Terminale iki kez yapıştırıldığında değer birebir ikiye katlanır. Yankı
+  # kapalı olduğu için fark edilmez ve sunucudaki tam eşleşme sessizce başarısız
+  # olur (yaşanmış vaka: 47 karakterlik token 94 karakter olarak kaydedilmişti).
+  half="$(doubled_half "$t")"
+  [ -n "$half" ] && warn "Değer ikiye katlanmış görünüyor (${#t} karakter); tek kopya da denenecek"
+
   info "Doğrulanıyor…"
-  if [ "$which" = task ]; then
-    target="$TASK_API/tasks?project=$(urlencode "${TASK_PROJECT:-omk-token-check}")"
-    code="$(http_ping_auth "$target" "X-Task-Token: $t")"
-  else
-    [ -n "${ORCH_API:-}" ] || die "ORCH_API tanımlı değil, doğrulanamaz"
-    target="$ORCH_API$ORCH_DEPLOY_PATH"
-    code="$(http_ping_auth "$target" "Authorization: Bearer $t")"
+  code="$(verify_token "$which" "$t")" || die "$code"
+  if [ "$code" != "2" ] && [ -n "$half" ]; then
+    half_code="$(verify_token "$which" "$half")" || true
+    if [ "$half_code" = "2" ]; then
+      ok "Tek kopya doğrulandı — ikiye katlanmış değer yerine o kaydedilecek"
+      t="$half"; code=2
+    fi
   fi
+  [ "$code" = "2" ] && code=200
 
   case "$code" in
     2??)     ok "Token doğrulandı (HTTP $code)" ;;
@@ -482,6 +489,31 @@ cmd_token() {
   ok "$var kaydedildi: $OMK_CRED_FILE"
   dim "Açık terminaller eski değeri taşıyor. Yenilemek için:"
   dim "set -a; . \"$OMK_CRED_FILE\"; set +a"
+}
+
+# Değer birebir ikiye katlanmışsa tek kopyayı yazar, değilse boş döner
+doubled_half() {
+  v="$1"; len=${#v}
+  [ "$len" -ge 2 ] && [ $((len % 2)) -eq 0 ] || return 0
+  h=$((len / 2))
+  a="$(printf '%s' "$v" | cut -c"1-$h")"
+  b="$(printf '%s' "$v" | cut -c"$((h + 1))-$len")"
+  [ "$a" = "$b" ] && printf '%s' "$a"
+  return 0
+}
+
+# Token'ı canlı çağrıyla dener. 2xx ise "2", değilse HTTP kodunu yazar.
+verify_token() { # task|orch token
+  case "$1" in
+    task) vt="$TASK_API/tasks?project=$(urlencode "${TASK_PROJECT:-omk-token-check}")"
+          vc="$(http_ping_auth "$vt" "X-Task-Token: $2")" ;;
+    orch) [ -n "${ORCH_API:-}" ] || { printf 'ORCH_API tanımlı değil, doğrulanamaz'; return 1; }
+          vt="$ORCH_API$ORCH_DEPLOY_PATH"
+          vc="$(http_ping_auth "$vt" "Authorization: Bearer $2")" ;;
+  esac
+  target="$vt"
+  case "$vc" in 2??) printf '2' ;; *) printf '%s' "$vc" ;; esac
+  return 0
 }
 
 # Doğrulama başarısız: --force yoksa kaydetmeden çık
