@@ -13,7 +13,10 @@ Bu dosya `omk init` ile oluşturuldu ({{CREATED_AT}}). Proje tipi: **{{PTYPE}}**
 - Yeni iş çıktığında hemen task aç; durum değiştiğinde hemen güncelle.
 - PROMPT, SCOPE, ARCHITECTURE, DEPLOYMENT ve tasarım dokümanlarında yapılan her değişikliği `POST /documents/upsert` ile Task API'ye gönder.
 - Görseller ve tasarım çıktıları `docs/assets/` altında tutulur; ilgili doküman içinde referans verilir.
-- `task_mcp` MCP sunucusu varsa HTTP çağrısı yerine onun araçlarını kullan.
+- Task MCP (`.mcp.json` içindeki `tasks`) HTTP çağrısı yerine tercih edilir: `list_tasks`,
+  `create_task`, `update_task`, `list_documents`, `upsert_document`, `list_projects`.
+  İlk kullanımda `/mcp` → *Authenticate* ile OAuth girişi gerekir (tek seferlik).
+- Silme ve ekran görüntüsü yükleme MCP'de yok; bunlar için HTTP API ya da web arayüzü.
 
 ## Deploy
 Deploy işlemleri **yalnızca orchestrator** üzerinden yapılır; bu repoda fastlane, sertifika veya SSH anahtarı tutulmaz.
