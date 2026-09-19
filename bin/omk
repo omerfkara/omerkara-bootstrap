@@ -17,6 +17,11 @@ OMK_VENV="$OMK_HOME/venv"
 TASK_MCP_DIR="$OMK_HOME/task-mcp"
 SHELL_MARK="# >>> omerkara credentials >>>"
 
+# Opsiyonun değeri var mı? ($2 yoksa 'unbound variable' yerine anlaşılır hata)
+need_val() { # opsiyon_adi kalan_arg_sayisi
+  [ "$2" -ge 2 ] || die "$1 bir değer bekliyor (ör: $1 <değer>)"
+}
+
 usage() {
   cat <<USAGE
 omk — proje bootstrap aracı
@@ -86,7 +91,7 @@ ensure_token() { # var prompt op_ref_var required
 install_skills() {
   info "Skill'ler"
   mkdir -p "$HOME/.claude/skills"
-  grep -vE '^\s*(#|$)' "$BOOT_DIR/skills.txt" | while IFS='|' read -r name url required; do
+  grep -vE '^[[:space:]]*(#|$)' "$BOOT_DIR/skills.txt" | while IFS='|' read -r name url required; do
     if ! sync_repo "$url" "$HOME/.claude/skills/$name"; then
       [ "$required" = "yes" ] && warn "Zorunlu skill kurulamadı: $name"
     fi
@@ -143,8 +148,8 @@ cmd_init() {
   PROJECT=""; DIR=""; PTYPE="other"; GITHUB=0; REMOTE=1; FORCE=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --dir) DIR="$2"; shift 2 ;;
-      --type) PTYPE="$2"; shift 2 ;;
+      --dir) need_val --dir $#; DIR="$2"; shift 2 ;;
+      --type) need_val --type $#; PTYPE="$2"; shift 2 ;;
       --github) GITHUB=1; shift ;;
       --no-remote) REMOTE=0; shift ;;
       --force) FORCE=1; shift ;;
@@ -177,6 +182,8 @@ cmd_init() {
   DIR="${DIR:-$PWD/$PROJECT}"
   if [ "$DRY_RUN" = "1" ] && [ ! -d "$DIR" ]; then
     DRY_TMP="$(mktemp -d)"; dim "[dry-run] klasör oluşturulmayacak: $DIR"
+    # hata/kesinti halinde geçici klasör /tmp'de kalmasın
+    trap 'rm -rf "$DRY_TMP"' EXIT INT TERM
   else
     mkdir -p "$DIR"; DIR="$(cd "$DIR" && pwd)"
   fi
@@ -228,7 +235,7 @@ cmd_init() {
   fi
 
   [ "$GITHUB" = "1" ] && create_github_repo
-  [ -n "${DRY_TMP:-}" ] && rm -rf "$DRY_TMP"
+  [ -n "${DRY_TMP:-}" ] && { rm -rf "$DRY_TMP"; trap - EXIT INT TERM; }
 
   echo
   ok "$PROJECT hazır."
@@ -238,7 +245,8 @@ cmd_init() {
 # Task API'de bu projenin dokümanları varsa docs/ altına indirir
 pull_remote_docs() {
   resp="$(task_api GET "/documents?project=$(urlencode "$PROJECT")")" || return 1
-  REMOTE_DOCS="$(printf '%s' "$resp" | python3 "$BOOT_DIR/lib/docs.py" names)" || REMOTE_DOCS=""
+  # API bazı projelerde "SCOPE", bazılarında "UI.md" döndürüyor; uzantıyı at
+  REMOTE_DOCS="$(printf '%s' "$resp" | python3 "$BOOT_DIR/lib/docs.py" names | sed 's/\.md$//')" || REMOTE_DOCS=""
   [ -z "$REMOTE_DOCS" ] && { dim "Task API'de henüz doküman yok"; return 0; }
   info "Task API'deki dokümanlar: $(echo $REMOTE_DOCS)"
   [ "${DRY_RUN:-0}" = "1" ] && return 0
@@ -249,8 +257,8 @@ pull_remote_docs() {
 # Yerelde olup uzakta olmayan dokümanları gönderir (uzaktakinin üzerine yazmaz)
 push_docs() {
   [ -n "${TASK_TOKEN:-}" ] || { warn "TASK_TOKEN yok, dokümanlar gönderilmedi"; return 0; }
-  for n in PROMPT SCOPE; do
-    if printf '%s\n' $REMOTE_DOCS | grep -qx "$n"; then dim "uzakta mevcut: $n"; continue; fi
+  for n in ${OMK_SYNC_DOCS:-PROMPT SCOPE}; do
+    if printf '%s\n' $REMOTE_DOCS | grep -qx "$(doc_key "$n")"; then dim "uzakta mevcut: $n"; continue; fi
     [ -f "docs/$n.md" ] || continue
     body="$(python3 -c 'import json,sys;print(json.dumps({"project":sys.argv[1],"name":sys.argv[2],"content":open(sys.argv[3],encoding="utf-8").read()}))' "$PROJECT" "$n" "docs/$n.md")"
     if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST /documents/upsert $n"; continue; fi
@@ -317,8 +325,13 @@ create_github_repo() {
 
 # ---------------------------------------------------------------- update
 cmd_update() {
-  info "Bootstrap"
-  sync_repo "https://github.com/$OMK_GITHUB_USER/omerkara-bootstrap.git" "$BOOT_DIR" || true
+  # Bash script'i satır satır okur: çalışan dosyayı yerinde güncellemek
+  # kalan kısmın yanlış offset'ten okunmasına yol açar. Önce pull, sonra exec.
+  if [ "${OMK_UPDATED:-0}" != "1" ]; then
+    info "Bootstrap"
+    sync_repo "https://github.com/$OMK_GITHUB_USER/omerkara-bootstrap.git" "$BOOT_DIR" || true
+    OMK_UPDATED=1 exec "$BOOT_DIR/bin/omk" update
+  fi
   load_credentials
   install_skills
   install_task_mcp
@@ -343,14 +356,37 @@ cmd_doctor() {
   info "Skill / MCP"
   [ -f "$HOME/.claude/skills/omerkara-sdlc/SKILL.md" ] && ok "omerkara-sdlc skill" || { warn "omerkara-sdlc skill yok"; fail=1; }
   [ -f "$TASK_MCP_DIR/task_mcp.py" ] && ok "task-mcp" || dim "task-mcp yok"
+  info "Ortam"
+  hook=0
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    grep -qF "$SHELL_MARK" "$rc" 2>/dev/null && { ok "shell hook: $rc"; hook=1; }
+  done
+  [ "$hook" = "1" ] || { warn "shell hook hiçbir rc dosyasında yok → omk setup"; fail=1; }
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ok "~/.local/bin PATH'te" ;;
+    *) warn "~/.local/bin PATH'te değil (yeni terminal açın ya da omk setup)"; fail=1 ;;
+  esac
+  # Genişlememiş değişken kontrolü: Task API'de '$TASK_PROJECT' adlı proje bu yüzden oluşuyor
+  for v in TASK_PROJECT TASK_API TASK_TOKEN; do
+    eval "val=\${$v:-}"
+    case "$val" in
+      '$'*|'${'*) warn "$v genişlememiş görünüyor: $val  (rc hook yüklenmemiş olabilir)"; fail=1 ;;
+    esac
+  done
   info "Erişim"
   if [ -n "${TASK_TOKEN:-}" ]; then
     if task_api GET "/tasks?project=$(urlencode "$project")" >/dev/null 2>&1; then ok "Task API ($TASK_API)"
     else warn "Task API'ye erişilemedi veya token geçersiz"; fail=1; fi
   fi
   if [ -n "${ORCH_API:-}" ]; then
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$ORCH_API/health" || echo 000)"
-    case "$code" in 2??) ok "Orchestrator ($ORCH_API)" ;; *) warn "Orchestrator /health → HTTP $code" ;; esac
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$ORCH_API$ORCH_HEALTH_PATH" || echo 000)"
+    case "$code" in
+      2??) ok "Orchestrator ($ORCH_API)" ;;
+      000) warn "Orchestrator'a ulaşılamadı: $ORCH_API$ORCH_HEALTH_PATH"; fail=1 ;;
+      *)   warn "Orchestrator $ORCH_HEALTH_PATH → HTTP $code"; fail=1 ;;
+    esac
+  else
+    dim "ORCH_API tanımlı değil — deploy komutları devre dışı"
   fi
   [ "$fail" = "0" ] && ok "Her şey yolunda" || die "Sorunlar var (yukarıya bakın)"
 }

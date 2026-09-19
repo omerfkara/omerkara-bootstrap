@@ -12,5 +12,13 @@ mkdir -p "$OMK_HOME"
 if [ -d "$DEST/.git" ]; then git -C "$DEST" pull -q --ff-only
 else git clone -q "$REPO" "$DEST"; fi
 
-"$DEST/bin/omk" setup < /dev/tty
-if [ $# -gt 0 ]; then "$DEST/bin/omk" "$@" < /dev/tty; fi
+# curl | bash altında stdin borudur; etkileşim için /dev/tty gerekir.
+# tty yoksa (CI, bazı container/SSH ortamları) etkileşimsiz devam edilir.
+if [ -e /dev/tty ] && ( : < /dev/tty ) 2>/dev/null; then
+  "$DEST/bin/omk" setup < /dev/tty
+  if [ $# -gt 0 ]; then "$DEST/bin/omk" "$@" < /dev/tty; fi
+else
+  echo "! tty yok — etkileşimsiz mod. Token'ları ortam değişkeni olarak verin (TASK_TOKEN=...)" >&2
+  "$DEST/bin/omk" setup < /dev/null
+  if [ $# -gt 0 ]; then "$DEST/bin/omk" "$@" < /dev/null; fi
+fi
