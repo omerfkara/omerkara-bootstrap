@@ -52,7 +52,7 @@ require_cmds() {
 }
 
 # Ortamdan gelen değerlerin dosyadakini ezmesi gereken anahtarlar
-OMK_OVERRIDABLE="TASK_TOKEN ORCH_TOKEN TASK_API ORCH_API ORCH_REGISTER_PATH ORCH_DEPLOY_PATH ORCH_HEALTH_PATH TASK_PROJECT"
+OMK_OVERRIDABLE="TASK_TOKEN ORCH_TOKEN TASK_API TASK_MCP_URL ORCH_API ORCH_REGISTER_PATH ORCH_DEPLOY_PATH ORCH_HEALTH_PATH TASK_PROJECT"
 
 # Makine seviyesi credential ve config dosyalarını yükler.
 # Öncelik: ortam değişkeni > credentials > config > varsayılan.
@@ -79,6 +79,8 @@ load_credentials() {
   unset _v
   export TASK_API="${TASK_API:-https://n8n.omerkara.com/webhook}"
   export TASK_SPEC_URL="${TASK_SPEC_URL:-https://tasks.omerkara.com/task-management.md}"
+  # Task MCP uzak sunucu, OAuth ile kimlik doğrular — .mcp.json'a token yazılmaz
+  export TASK_MCP_URL="${TASK_MCP_URL:-https://tasks.omerkara.com/api/mcp}"
   export ORCH_API="${ORCH_API:-}"
   export ORCH_REGISTER_PATH="${ORCH_REGISTER_PATH:-/projects}"
   export ORCH_DEPLOY_PATH="${ORCH_DEPLOY_PATH:-/deployments}"
@@ -154,6 +156,14 @@ task_api() {
 doc_key() { printf '%s' "${1%.md}"; }
 
 urlencode() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1"; }
+
+# Bir uç noktayı yoklar ve HTTP kodunu yazar; ulaşılamazsa 000.
+# (curl zaten 000 yazdığı için '|| echo 000' kalıbı "000000" üretiyordu.)
+http_ping() { # url [timeout]
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "${2:-10}" "$1" 2>/dev/null || true)"
+  case "$code" in ''|*[!0-9]*) code=000 ;; esac
+  printf '%s' "$code"
+}
 
 # Orchestrator API çağrısı: method path [json_body]
 # Gövdeyi stdout'a, HTTP kodunu son satıra yazar.

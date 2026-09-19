@@ -13,8 +13,8 @@ BOOT_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
 # shellcheck source=../lib/common.sh
 . "$BOOT_DIR/lib/common.sh"
 TPL="$BOOT_DIR/templates"
-OMK_VENV="$OMK_HOME/venv"
-TASK_MCP_DIR="$OMK_HOME/task-mcp"
+OMK_VENV="$OMK_HOME/venv"                 # eski yerel task-mcp kurulumundan kalma
+TASK_MCP_DIR="$OMK_HOME/task-mcp"         # (artık kullanılmıyor, temizlik için tutuluyor)
 SHELL_MARK="# >>> omerkara credentials >>>"
 
 # Opsiyonun değeri var mı? ($2 yoksa 'unbound variable' yerine anlaşılır hata)
@@ -84,7 +84,7 @@ cmd_setup() {
   fi
 
   install_skills
-  install_task_mcp
+  note_legacy_task_mcp
   install_shell_hook
   install_cli_link
   ok "Kurulum tamam. Yeni bir terminal açın (ya da: source ~/.$(basename "${SHELL:-bash}")rc)"
@@ -111,21 +111,14 @@ install_skills() {
   done
 }
 
-install_task_mcp() {
-  info "task-mcp"
-  sync_repo "https://github.com/$OMK_GITHUB_USER/task-mcp.git" "$TASK_MCP_DIR" || return 0
-  if [ ! -f "$TASK_MCP_DIR/task_mcp.py" ]; then
-    warn "task-mcp reposunda task_mcp.py yok (kod henüz push edilmemiş olabilir) — MCP adımı atlandı"
-    return 0
+# Task MCP artık uzak bir sunucu (OAuth): https://tasks.omerkara.com/api/mcp
+# Kurulum gerektirmiyor; eskiden klonlanan yerel kopya varsa kullanıcıya haber ver.
+note_legacy_task_mcp() {
+  if [ -d "$TASK_MCP_DIR" ] || [ -d "$OMK_VENV" ]; then
+    warn "Eski yerel task-mcp kurulumu duruyor; artık kullanılmıyor, silebilirsiniz:"
+    dim "rm -rf \"$TASK_MCP_DIR\" \"$OMK_VENV\""
   fi
-  if [ ! -x "$OMK_VENV/bin/python" ]; then
-    if has uv; then run uv venv -q "$OMK_VENV"; else run python3 -m venv "$OMK_VENV"; fi
-  fi
-  if [ -f "$TASK_MCP_DIR/requirements.txt" ]; then
-    if has uv; then run uv pip install -q --python "$OMK_VENV/bin/python" -r "$TASK_MCP_DIR/requirements.txt"
-    else run "$OMK_VENV/bin/pip" install -q -r "$TASK_MCP_DIR/requirements.txt"; fi
-  fi
-  ok "task-mcp hazır ($OMK_VENV)"
+  dim "task MCP: $TASK_MCP_URL (OAuth — ilk kullanımda Claude Code içinde /mcp → Authenticate)"
 }
 
 # Credential'ları shell açılışında export eder (Claude Code .mcp.json ${VAR} genişletmesi için)
@@ -203,8 +196,6 @@ cmd_init() {
   info "Proje: $PROJECT  →  $DIR  (tip: $PTYPE, runner: $DEPLOY_RUNNER)"
 
   export PROJECT PTYPE DEPLOY_RUNNER TASK_API ORCH_API
-  export OMK_VENV_PY="$OMK_VENV/bin/python"
-  export TASK_MCP_PATH="$TASK_MCP_DIR/task_mcp.py"
   export CREATED_AT; CREATED_AT="$(date +%Y-%m-%d)"
   export GITHUB_REPO="$OMK_GITHUB_USER/$PROJECT"
 
@@ -226,11 +217,8 @@ cmd_init() {
   if [ "$DEPLOY_RUNNER" != "none" ]; then
     render_template "$TPL/deploy.yml.tmpl" deploy.yml "$FORCE"
   fi
-  if [ -f "$TASK_MCP_PATH" ]; then
-    render_template "$TPL/mcp.json.tmpl" .mcp.json "$FORCE"
-  else
-    dim "task-mcp kurulu değil, .mcp.json atlandı"
-  fi
+  # Uzak MCP: dosyada secret yok, commit edilebilir
+  render_template "$TPL/mcp.json.tmpl" .mcp.json "$FORCE"
   [ -f .env ] || { [ "$DRY_RUN" = "1" ] && dim "[dry-run] .env oluştur" || { cp .env.example .env; chmod 600 .env; ok "yazıldı: .env"; }; }
 
   if [ "$DRY_RUN" != "1" ]; then
@@ -446,7 +434,7 @@ cmd_update() {
   fi
   load_credentials
   install_skills
-  install_task_mcp
+  note_legacy_task_mcp
   ok "Güncelleme tamam"
 }
 
@@ -467,7 +455,14 @@ cmd_doctor() {
   [ -n "${ORCH_TOKEN:-}" ] && ok "ORCH_TOKEN" || dim "ORCH_TOKEN yok"
   info "Skill / MCP"
   [ -f "$HOME/.claude/skills/omerkara-sdlc/SKILL.md" ] && ok "omerkara-sdlc skill" || { warn "omerkara-sdlc skill yok"; fail=1; }
-  [ -f "$TASK_MCP_DIR/task_mcp.py" ] && ok "task-mcp" || dim "task-mcp yok"
+  code="$(http_ping "$TASK_MCP_URL")"
+  case "$code" in
+    # 401/405 da "ayakta" demek: OAuth'suz ya da yanlış metotla çağırdık
+    2??|401|403|405|406) ok "task MCP ($TASK_MCP_URL)" ;;
+    000) warn "task MCP'ye ulaşılamadı: $TASK_MCP_URL"; fail=1 ;;
+    *)   warn "task MCP → HTTP $code" ;;
+  esac
+  [ -d "$TASK_MCP_DIR" ] && dim "eski yerel task-mcp klasörü duruyor: $TASK_MCP_DIR (silinebilir)"
   info "Ortam"
   hook=0
   for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
@@ -492,7 +487,7 @@ cmd_doctor() {
     else warn "Task API'ye erişilemedi veya token geçersiz"; fail=1; fi
   fi
   if [ -n "${ORCH_API:-}" ]; then
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$ORCH_API$ORCH_HEALTH_PATH" || echo 000)"
+    code="$(http_ping "$ORCH_API$ORCH_HEALTH_PATH")"
     case "$code" in
       2??) ok "Orchestrator ($ORCH_API)" ;;
       000) warn "Orchestrator'a ulaşılamadı: $ORCH_API$ORCH_HEALTH_PATH"; fail=1 ;;

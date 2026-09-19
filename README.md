@@ -2,7 +2,8 @@
 
 Her makinede tek komutla proje ortamı hazırlar:
 
-- **Task API** (tasks.omerkara.com / n8n) için token, skill ve MCP
+- **Task API** (tasks.omerkara.com / n8n) için token ve skill
+- **Task MCP** (`https://tasks.omerkara.com/api/mcp`, OAuth) için `.mcp.json`
 - **Orchestrator** için deploy tanımı ve proje kaydı
 - **Claude Code** için `CLAUDE.md`, `.mcp.json` ve `.claude/settings.json`
 
@@ -17,8 +18,10 @@ Kurulum şunları yapar:
 1. Bu repoyu `~/.omerkara/bootstrap` altına klonlar.
 2. Token'ları `~/.config/omerkara/credentials` dosyasına yazar (chmod 600). Sırayla şu kaynaklara bakar: ortam değişkeni, ardından 1Password, ardından kullanıcıya sorar.
 3. `skills.txt` içindeki skill'leri `~/.claude/skills/` altına kurar.
-4. task-mcp'yi `~/.omerkara/task-mcp` altına kurar ve bağımlılıklarını `~/.omerkara/venv` içine yükler.
-5. `~/.zshrc` / `~/.bashrc` dosyasına credential yükleyen bir blok ekler. Claude Code, `.mcp.json` içindeki `${TASK_TOKEN}` değerini buradan alır.
+4. Task MCP için kurulum yapmaz — uzak bir sunucudur ve OAuth ile kimlik doğrular.
+   Eskiden klonlanmış yerel bir kopya varsa uyarır (silinebilir).
+5. `~/.zshrc` / `~/.bashrc` dosyasına credential yükleyen bir blok ekler; `omk` ve
+   `omerkara-sdlc` skill'i `TASK_TOKEN`'ı buradan alır.
 6. `omk` komutunu `~/.local/bin/omk` olarak bağlar.
 
 Etkileşimsiz kurulum (CI, Pi, SSH):
@@ -76,7 +79,9 @@ Komut tekrar çalıştırılabilir; her çalıştırmada eksik olanı tamamlar.
 
 ## Güvenlik
 
-- Token'lar hiçbir proje dosyasına yazılmaz. `.mcp.json` sadece `${TASK_TOKEN}` referansı içerir, bu yüzden commit edilebilir.
+- Token'lar hiçbir proje dosyasına yazılmaz. `.mcp.json` yalnızca MCP adresini içerir —
+  hiç secret taşımaz, rahatça commit edilir. Kimlik doğrulama OAuth ile yapılır:
+  Claude Code içinde ilk kullanımda `/mcp` → *Authenticate*.
 - `.env` gitignore'dadır ve yalnızca secret olmayan proje ayarlarını içerir.
 - Token'ı yenilemek için: `~/.config/omerkara/credentials` içindeki satırı silin, ardından `omk setup` çalıştırın.
 
@@ -84,7 +89,8 @@ Komut tekrar çalıştırılabilir; her çalıştırmada eksik olanı tamamlar.
 
 | Değişken | Varsayılan | Açıklama |
 | :--- | :--- | :--- |
-| `TASK_API` | `https://n8n.omerkara.com/webhook` | Task API adresi |
+| `TASK_API` | `https://n8n.omerkara.com/webhook` | Task API adresi (HTTP, `X-Task-Token`) |
+| `TASK_MCP_URL` | `https://tasks.omerkara.com/api/mcp` | Task MCP adresi (OAuth) |
 | `ORCH_API` | – | Orchestrator adresi (örn. `https://orchestrator.omerkara.com`) |
 | `ORCH_REGISTER_PATH` | `/projects` | Proje kayıt endpoint'i |
 | `ORCH_DEPLOY_PATH` | `/deployments` | Deploy tetikleme / listeleme endpoint'i |

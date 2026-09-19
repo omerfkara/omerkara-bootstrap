@@ -1,13 +1,8 @@
 {
   "mcpServers": {
-    "task_mcp": {
-      "command": "${HOME}/.omerkara/venv/bin/python",
-      "args": ["${HOME}/.omerkara/task-mcp/task_mcp.py"],
-      "env": {
-        "TASK_TOKEN": "${TASK_TOKEN}",
-        "TASK_API": "${TASK_API:-{{TASK_API}}}",
-        "TASK_PROJECT": "{{PROJECT}}"
-      }
+    "tasks": {
+      "type": "http",
+      "url": "{{TASK_MCP_URL}}"
     }
   }
 }
