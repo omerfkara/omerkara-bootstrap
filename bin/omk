@@ -31,6 +31,8 @@ Komutlar:
   omk init <proje> [opsiyonlar]
                             Yeni proje oluşturur ya da mevcut projeyi bu makineye bağlar
   omk update                Bootstrap, skill'ler ve task-mcp'yi günceller
+  omk deploy [proje]        Orchestrator üzerinden deploy tetikler
+  omk status [proje]        Son deployment'ları listeler
   omk doctor [proje]        Bağımlılık, token ve API erişimini kontrol eder
   omk help
 
@@ -42,9 +44,20 @@ init opsiyonları:
   --force                   Mevcut şablon dosyalarının üzerine yazar
   --dry-run                 Yapılacakları gösterir, değişiklik yapmaz
 
+deploy opsiyonları:
+  --env <ortam>             deploy.yml'deki ortam (ör. staging, production)
+  --ref <dal|commit>        Gönderilecek referans (varsayılan: ortamın branch'i)
+  --wait                    Bitene kadar durumu izle
+  --dry-run                 Gövdeyi göster, gönderme
+
+status opsiyonları:
+  -n <adet>                 Kaç kayıt gösterilsin (varsayılan 10)
+  --all                     Tüm projeler (varsayılan: bulunduğun proje)
+
 Ortam değişkenleri (opsiyonel):
   TASK_API, ORCH_API, ORCH_REGISTER_PATH, OMK_GITHUB_USER
   OMK_OP_TASK_TOKEN, OMK_OP_ORCH_TOKEN   1Password referansları (op://...)
+  ORCH_DEPLOY_PATH, ORCH_HEALTH_PATH     Orchestrator uç noktaları
 USAGE
 }
 
@@ -287,16 +300,20 @@ register_orchestrator() {
     dim "ORCH_API/ORCH_TOKEN tanımlı değil — orchestrator kaydı atlandı (deploy.yml yine de yazıldı)"
     return 0
   fi
-  body="$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1],"type":sys.argv[2],"runner":sys.argv[3],"repo":sys.argv[4]}))' \
-    "$PROJECT" "$PTYPE" "$DEPLOY_RUNNER" "$GITHUB_REPO")"
-  if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_REGISTER_PATH"; return 0; fi
-  code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$ORCH_API$ORCH_REGISTER_PATH" \
-    -H "Authorization: Bearer $ORCH_TOKEN" -H "Content-Type: application/json" \
-    --data-binary "$body" --max-time 20 || echo 000)"
-  case "$code" in
+  # Kayıt gövdesi deploy.yml'den üretilir: tek bir tanım kaynağı olsun
+  if [ -f deploy.yml ]; then
+    body="$(python3 "$BOOT_DIR/lib/orch.py" body deploy.yml)"
+  else
+    body="$(python3 -c 'import json,sys;print(json.dumps({"project":sys.argv[1],"type":sys.argv[2],"runner":sys.argv[3],"repo":sys.argv[4]}))' \
+      "$PROJECT" "$PTYPE" "$DEPLOY_RUNNER" "$GITHUB_REPO")"
+  fi
+  if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_REGISTER_PATH  $body"; return 0; fi
+  resp="$(orch_api POST "$ORCH_REGISTER_PATH" "$body")" || { warn "Orchestrator kaydı yapılamadı"; return 0; }
+  case "$(http_code_of "$resp")" in
     2??) ok "Orchestrator'a kaydedildi" ;;
     409) dim "Orchestrator'da zaten kayıtlı" ;;
-    *)   warn "Orchestrator kaydı başarısız (HTTP $code)" ;;
+    401|403) warn "Orchestrator kaydı reddedildi — ORCH_TOKEN geçersiz" ;;
+    *)   warn "Orchestrator kaydı başarısız (HTTP $(http_code_of "$resp")): $(http_body_of "$resp" | head -c 200)" ;;
   esac
 }
 
@@ -321,6 +338,101 @@ create_github_repo() {
         && ok "Orchestrator webhook'u eklendi"
     fi
   fi
+}
+
+# ---------------------------------------------------------------- deploy
+# deploy.yml'i bulur ve mutlak yolunu yazar (proje kökünü yukarı doğru arar)
+find_deploy_yml() {
+  d="$PWD"
+  while [ "$d" != "/" ]; do
+    [ -f "$d/deploy.yml" ] && { printf '%s' "$d/deploy.yml"; return 0; }
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+cmd_deploy() {
+  DEPLOY_ENV=""; DEPLOY_REF=""; WAIT=0; PROJECT=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --env)     need_val --env $#; DEPLOY_ENV="$2"; shift 2 ;;
+      --ref)     need_val --ref $#; DEPLOY_REF="$2"; shift 2 ;;
+      --wait)    WAIT=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "Bilinmeyen opsiyon: $1" ;;
+      *) [ -z "$PROJECT" ] && PROJECT="$1" || die "Fazla argüman: $1"; shift ;;
+    esac
+  done
+  export DRY_RUN="${DRY_RUN:-0}"
+  load_credentials
+  [ -n "${ORCH_API:-}" ] || die "ORCH_API tanımlı değil. Ayarlamak için: omk setup ya da ~/.config/omerkara/config"
+
+  yml="$(find_deploy_yml)" || die "deploy.yml bulunamadı. Proje klasöründe misiniz? (omk init ... --type <tip> ile oluşur)"
+  dim "tanım: $yml"
+  body="$(python3 "$BOOT_DIR/lib/orch.py" body "$yml" "$DEPLOY_REF" "$DEPLOY_ENV")"
+  [ -n "$PROJECT" ] && body="$(printf '%s' "$body" | python3 -c 'import json,sys;d=json.load(sys.stdin);d["project"]=sys.argv[1];print(json.dumps(d))' "$PROJECT")"
+
+  if [ "$DRY_RUN" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_DEPLOY_PATH"; echo "$body"; return 0; fi
+
+  info "Deploy tetikleniyor: $ORCH_API$ORCH_DEPLOY_PATH"
+  resp="$(orch_api POST "$ORCH_DEPLOY_PATH" "$body")" || die "Orchestrator'a ulaşılamadı"
+  code="$(http_code_of "$resp")"; out="$(http_body_of "$resp")"
+  case "$code" in
+    2??) ;;
+    401|403) die "Yetki reddedildi (HTTP $code) — ORCH_TOKEN geçersiz" ;;
+    404) die "Uç nokta bulunamadı: $ORCH_DEPLOY_PATH (ORCH_DEPLOY_PATH ile değiştirilebilir)" ;;
+    *) die "Deploy başlatılamadı (HTTP $code): $(printf '%s' "$out" | head -c 300)" ;;
+  esac
+  id="$(printf '%s' "$out" | python3 "$BOOT_DIR/lib/orch.py" field id 2>/dev/null || true)"
+  [ -n "$id" ] && ok "Deploy başlatıldı: $id" || ok "Deploy başlatıldı"
+  [ "$WAIT" = "1" ] && [ -n "$id" ] && watch_deploy "$id"
+  return 0
+}
+
+# Deployment bitene kadar durumu yoklar
+watch_deploy() {
+  id="$1"; n=0; last=""
+  info "Durum izleniyor (Ctrl-C ile çıkabilirsiniz)"
+  while [ "$n" -lt "${OMK_WAIT_MAX:-120}" ]; do
+    resp="$(orch_api GET "$ORCH_DEPLOY_PATH/$id")" || { warn "durum okunamadı"; return 1; }
+    case "$(http_code_of "$resp")" in 2??) ;; *) warn "durum okunamadı (HTTP $(http_code_of "$resp"))"; return 1 ;; esac
+    st="$(http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" field status 2>/dev/null || true)"
+    [ "$st" != "$last" ] && { dim "durum: ${st:-bilinmiyor}"; last="$st"; }
+    case "$st" in
+      done|success|succeeded|completed|ok) ok "Deploy tamamlandı: $st"; return 0 ;;
+      failed|error|cancelled|canceled)     die "Deploy başarısız: $st" ;;
+    esac
+    n=$((n+1)); sleep "${OMK_WAIT_INTERVAL:-5}"
+  done
+  warn "Zaman aşımı — orchestrator panelinden takip edin"
+}
+
+cmd_status() {
+  LIMIT=10; ALL=0; PROJECT=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n)  need_val -n $#; LIMIT="$2"; shift 2 ;;
+      --all) ALL=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "Bilinmeyen opsiyon: $1" ;;
+      *) [ -z "$PROJECT" ] && PROJECT="$1" || die "Fazla argüman: $1"; shift ;;
+    esac
+  done
+  load_credentials
+  [ -n "${ORCH_API:-}" ] || die "ORCH_API tanımlı değil."
+  if [ "$ALL" != "1" ] && [ -z "$PROJECT" ]; then
+    yml="$(find_deploy_yml)" && PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" body "$yml" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("project",""))')" || PROJECT=""
+  fi
+  q="?limit=$LIMIT"
+  [ "$ALL" != "1" ] && [ -n "$PROJECT" ] && q="?project=$(urlencode "$PROJECT")&limit=$LIMIT"
+  [ -n "$PROJECT" ] && [ "$ALL" != "1" ] && info "Son deployment'lar: $PROJECT" || info "Son deployment'lar (tüm projeler)"
+  resp="$(orch_api GET "$ORCH_DEPLOY_PATH$q")" || die "Orchestrator'a ulaşılamadı"
+  case "$(http_code_of "$resp")" in
+    2??) http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" table "$LIMIT" ;;
+    404) die "Uç nokta bulunamadı: $ORCH_DEPLOY_PATH (ORCH_DEPLOY_PATH ile değiştirilebilir)" ;;
+    *) die "Liste alınamadı (HTTP $(http_code_of "$resp"))" ;;
+  esac
 }
 
 # ---------------------------------------------------------------- update
@@ -363,14 +475,15 @@ cmd_doctor() {
   done
   [ "$hook" = "1" ] || { warn "shell hook hiçbir rc dosyasında yok → omk setup"; fail=1; }
   case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ok "~/.local/bin PATH'te" ;;
-    *) warn "~/.local/bin PATH'te değil (yeni terminal açın ya da omk setup)"; fail=1 ;;
+    *":$HOME/.local/bin:"*) ok "$HOME/.local/bin PATH'te" ;;
+    *) warn "$HOME/.local/bin PATH'te değil (yeni terminal açın ya da omk setup)"; fail=1 ;;
   esac
   # Genişlememiş değişken kontrolü: Task API'de '$TASK_PROJECT' adlı proje bu yüzden oluşuyor
+  val=""
   for v in TASK_PROJECT TASK_API TASK_TOKEN; do
     eval "val=\${$v:-}"
     case "$val" in
-      '$'*|'${'*) warn "$v genişlememiş görünüyor: $val  (rc hook yüklenmemiş olabilir)"; fail=1 ;;
+      '$'*) warn "$v genişlememiş görünüyor: $val  (rc hook yüklenmemiş olabilir)"; fail=1 ;;
     esac
   done
   info "Erişim"
@@ -396,6 +509,8 @@ cmd="${1:-help}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   setup)  cmd_setup "$@" ;;
   init)   cmd_init "$@" ;;
+  deploy) cmd_deploy "$@" ;;
+  status) cmd_status "$@" ;;
   update) cmd_update "$@" ;;
   doctor) cmd_doctor "$@" ;;
   help|-h|--help) usage ;;
