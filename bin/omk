@@ -483,8 +483,20 @@ cmd_doctor() {
   done
   info "Erişim"
   if [ -n "${TASK_TOKEN:-}" ]; then
-    if task_api GET "/tasks?project=$(urlencode "$project")" >/dev/null 2>&1; then ok "Task API ($TASK_API)"
-    else warn "Task API'ye erişilemedi veya token geçersiz"; fail=1; fi
+    # Tek bir "erişilemedi veya token geçersiz" mesajı yerine HTTP koduna göre ayır
+    url="$TASK_API/tasks?project=$(urlencode "$project")"
+    code="$(http_ping_auth "$url" "X-Task-Token: $TASK_TOKEN")"
+    case "$code" in
+      2??) ok "Task API ($TASK_API)" ;;
+      000) warn "Task API'ye ulaşılamadı: $TASK_API"
+           dim "ağ, DNS ya da yanlış TASK_API — denemek için: curl -i \"$url\""; fail=1 ;;
+      401|403) warn "Task API token'ı reddetti (HTTP $code)"
+           dim "yeni token: https://tasks.omerkara.com/login — sonra ~/.config/omerkara/credentials içindeki TASK_TOKEN satırını silip 'omk setup'"; fail=1 ;;
+      404) warn "Task API uç noktası yok (HTTP 404): $TASK_API/tasks"
+           dim "TASK_API yanlış olabilir; beklenen: https://n8n.omerkara.com/webhook"; fail=1 ;;
+      5??) warn "Task API sunucu hatası (HTTP $code) — n8n workflow'u pasif olabilir"; fail=1 ;;
+      *)   warn "Task API → HTTP $code"; fail=1 ;;
+    esac
   fi
   if [ -n "${ORCH_API:-}" ]; then
     code="$(http_ping "$ORCH_API$ORCH_HEALTH_PATH")"

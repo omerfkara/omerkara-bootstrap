@@ -165,6 +165,13 @@ http_ping() { # url [timeout]
   printf '%s' "$code"
 }
 
+# http_ping'in başlıklı sürümü (ör. X-Task-Token ile yetkili yoklama)
+http_ping_auth() { # url header [timeout]
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -H "$2" --max-time "${3:-15}" "$1" 2>/dev/null || true)"
+  case "$code" in ''|*[!0-9]*) code=000 ;; esac
+  printf '%s' "$code"
+}
+
 # Orchestrator API çağrısı: method path [json_body]
 # Gövdeyi stdout'a, HTTP kodunu son satıra yazar.
 orch_api() {
