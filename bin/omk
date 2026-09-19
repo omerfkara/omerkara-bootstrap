@@ -33,6 +33,7 @@ Komutlar:
   omk update                Bootstrap, skill'ler ve task-mcp'yi günceller
   omk deploy [proje]        Orchestrator üzerinden deploy tetikler
   omk status [proje]        Son deployment'ları listeler
+  omk token [--task|--orch] Token'ı yeniler: sorar, doğrular, sonra kaydeder
   omk doctor [proje]        Bağımlılık, token ve API erişimini kontrol eder
   omk help
 
@@ -49,6 +50,12 @@ deploy opsiyonları:
   --ref <dal|commit>        Gönderilecek referans (varsayılan: ortamın branch'i)
   --wait                    Bitene kadar durumu izle
   --dry-run                 Gövdeyi göster, gönderme
+
+token opsiyonları:
+  --task                    TASK_TOKEN (varsayılan)
+  --orch                    ORCH_TOKEN
+  --force                   Doğrulama başarısız olsa da kaydet
+  (etkileşimsiz: OMK_TOKEN_VALUE=... omk token)
 
 status opsiyonları:
   -n <adet>                 Kaç kayıt gösterilsin (varsayılan 10)
@@ -423,6 +430,67 @@ cmd_status() {
   esac
 }
 
+# ---------------------------------------------------------------- token
+# Token'ı sorar, KAYDETMEDEN ÖNCE canlı bir çağrıyla doğrular.
+# Eski akış üç adımdı: credentials'tan satırı sil → omk setup → doctor ile dene.
+cmd_token() {
+  which=task; FORCE=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --task)  which=task; shift ;;
+      --orch)  which=orch; shift ;;
+      --force) FORCE=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "Bilinmeyen opsiyon: $1" ;;
+      *)  die "Fazla argüman: $1" ;;
+    esac
+  done
+  load_credentials
+  mkdir -p "$OMK_CONFIG_DIR"; chmod 700 "$OMK_CONFIG_DIR"
+
+  case "$which" in
+    task) var=TASK_TOKEN; ref=OMK_OP_TASK_TOKEN
+          prompt="Yeni TASK_TOKEN (https://tasks.omerkara.com/login)" ;;
+    orch) var=ORCH_TOKEN; ref=OMK_OP_ORCH_TOKEN
+          prompt="Yeni ORCH_TOKEN" ;;
+  esac
+
+  # Etkileşimsiz kullanım için: OMK_TOKEN_VALUE=... omk token
+  t="$(read_secret OMK_TOKEN_VALUE "$prompt" "$ref")"
+  # Yapıştırırken araya karışan boşluk/satır sonu birebir eşleşmeyi bozuyor
+  t="$(printf '%s' "$t" | tr -d '[:space:]')"
+  [ -n "$t" ] || die "Token boş — değişiklik yapılmadı"
+
+  info "Doğrulanıyor…"
+  if [ "$which" = task ]; then
+    target="$TASK_API/tasks?project=$(urlencode "${TASK_PROJECT:-omk-token-check}")"
+    code="$(http_ping_auth "$target" "X-Task-Token: $t")"
+  else
+    [ -n "${ORCH_API:-}" ] || die "ORCH_API tanımlı değil, doğrulanamaz"
+    target="$ORCH_API$ORCH_DEPLOY_PATH"
+    code="$(http_ping_auth "$target" "Authorization: Bearer $t")"
+  fi
+
+  case "$code" in
+    2??)     ok "Token doğrulandı (HTTP $code)" ;;
+    401|403) token_reject "$code" "Sunucu token'ı reddetti — doğru değeri kopyaladığınızdan emin olun" ;;
+    000)     token_reject "$code" "Sunucuya ulaşılamadı: $target" ;;
+    *)       token_reject "$code" "Beklenmeyen yanıt: $target" ;;
+  esac
+
+  run set_kv "$OMK_CRED_FILE" "$var" "$t"
+  ok "$var kaydedildi: $OMK_CRED_FILE"
+  dim "Açık terminaller eski değeri taşıyor. Yenilemek için:"
+  dim "set -a; . \"$OMK_CRED_FILE\"; set +a"
+}
+
+# Doğrulama başarısız: --force yoksa kaydetmeden çık
+token_reject() { # http_kodu aciklama
+  warn "$2 (HTTP $1)"
+  [ "$FORCE" = "1" ] || die "Token kaydedilmedi. Yine de kaydetmek için: omk token --force"
+  warn "--force verildi, doğrulanmadan kaydediliyor"
+}
+
 # ---------------------------------------------------------------- update
 cmd_update() {
   # Bash script'i satır satır okur: çalışan dosyayı yerinde güncellemek
@@ -518,6 +586,7 @@ case "$cmd" in
   init)   cmd_init "$@" ;;
   deploy) cmd_deploy "$@" ;;
   status) cmd_status "$@" ;;
+  token)  cmd_token "$@" ;;
   update) cmd_update "$@" ;;
   doctor) cmd_doctor "$@" ;;
   help|-h|--help) usage ;;

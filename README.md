@@ -45,6 +45,8 @@ omk setup
 omk init visual-configurator --type web --github   # yeni proje
 omk init harf-harbi --type api --dir .              # mevcut klonda (başka makine)
 omk init test-app --dry-run                         # sadece göster
+omk token                                           # TASK_TOKEN'ı yenile (doğrulayıp kaydeder)
+omk token --orch                                    # ORCH_TOKEN'ı yenile
 omk doctor                                          # kontrol
 omk update                                          # bootstrap + skill + mcp güncelle
 
@@ -83,7 +85,10 @@ Komut tekrar çalıştırılabilir; her çalıştırmada eksik olanı tamamlar.
   hiç secret taşımaz, rahatça commit edilir. Kimlik doğrulama OAuth ile yapılır:
   Claude Code içinde ilk kullanımda `/mcp` → *Authenticate*.
 - `.env` gitignore'dadır ve yalnızca secret olmayan proje ayarlarını içerir.
-- Token'ı yenilemek için: `~/.config/omerkara/credentials` içindeki satırı silin, ardından `omk setup` çalıştırın.
+- Token'ı yenilemek için: `omk token`. Yeni değeri sorar, baştaki/sondaki boşlukları
+  kırpar (birebir eşleşme gerektiği için önemli), **kaydetmeden önce** canlı bir
+  çağrıyla doğrular. Doğrulama başarısızsa dosyaya dokunmaz; `--force` ile zorlanır.
+  Etkileşimsiz: `OMK_TOKEN_VALUE=... omk token`.
 
 ## Yapılandırma
 
