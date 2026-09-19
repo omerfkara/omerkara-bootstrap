@@ -51,16 +51,38 @@ require_cmds() {
   fi
 }
 
-# Makine seviyesi credential ve config dosyalarını yükler
+# Ortamdan gelen değerlerin dosyadakini ezmesi gereken anahtarlar
+OMK_OVERRIDABLE="TASK_TOKEN ORCH_TOKEN TASK_API ORCH_API ORCH_REGISTER_PATH ORCH_DEPLOY_PATH ORCH_HEALTH_PATH TASK_PROJECT"
+
+# Makine seviyesi credential ve config dosyalarını yükler.
+# Öncelik: ortam değişkeni > credentials > config > varsayılan.
+# (Dosyalar 'set -a' ile source edildiği için ortamdaki değer önce saklanır,
+#  sonra geri yazılır; aksi halde tek seferlik ORCH_API=... gibi override'lar
+#  sessizce yok sayılır.)
 load_credentials() {
+  for _v in $OMK_OVERRIDABLE; do
+    # Boş ama tanımlı bir değer de kasıtlıdır (ör. ORCH_API= ile devre dışı bırakma).
+    # Koşul eval'in DIŞINDA: eval 1 dönerse set -e script'i sonlandırır.
+    if eval "[ -n \"\${$_v+x}\" ]"; then eval "OMK_ENV_$_v=\"\$$_v\""; fi
+  done
   # shellcheck disable=SC1090
   [ -f "$OMK_CONF_FILE" ] && { set -a; . "$OMK_CONF_FILE"; set +a; }
   # shellcheck disable=SC1090
   [ -f "$OMK_CRED_FILE" ] && { set -a; . "$OMK_CRED_FILE"; set +a; }
+  for _v in $OMK_OVERRIDABLE; do
+    if eval "[ -n \"\${OMK_ENV_$_v+x}\" ]"; then
+      eval "$_v=\"\$OMK_ENV_$_v\""
+      # shellcheck disable=SC2163  # değişken ADI $_v içinde; kasıtlı
+      export "$_v"
+    fi
+  done
+  unset _v
   export TASK_API="${TASK_API:-https://n8n.omerkara.com/webhook}"
   export TASK_SPEC_URL="${TASK_SPEC_URL:-https://tasks.omerkara.com/task-management.md}"
   export ORCH_API="${ORCH_API:-}"
   export ORCH_REGISTER_PATH="${ORCH_REGISTER_PATH:-/projects}"
+  export ORCH_DEPLOY_PATH="${ORCH_DEPLOY_PATH:-/deployments}"
+  export ORCH_HEALTH_PATH="${ORCH_HEALTH_PATH:-/health}"
 }
 
 # Değeri güvenli şekilde KEY=VALUE dosyasına yazar/günceller
@@ -86,9 +108,12 @@ read_secret() { # var_name prompt op_ref_var
   val=""
   if ( : < /dev/tty ) 2>/dev/null; then
     printf '%s: ' "$prompt" > /dev/tty
+    # Ctrl-C ya da hata halinde terminali echo kapalı bırakma
+    trap 'stty echo < /dev/tty 2>/dev/null || true' INT TERM EXIT
     stty -echo < /dev/tty 2>/dev/null || true
     IFS= read -r val < /dev/tty || true
     stty echo < /dev/tty 2>/dev/null || true
+    trap - INT TERM EXIT
     printf '\n' > /dev/tty
   fi
   printf '%s' "$val"
@@ -125,7 +150,30 @@ task_api() {
   fi
 }
 
+# Doküman adını normalize eder: "PROMPT.md" -> "PROMPT"
+doc_key() { printf '%s' "${1%.md}"; }
+
 urlencode() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1"; }
+
+# Orchestrator API çağrısı: method path [json_body]
+# Gövdeyi stdout'a, HTTP kodunu son satıra yazar.
+orch_api() {
+  m="$1"; p="$2"; body="${3:-}"
+  [ -n "${ORCH_API:-}" ]   || { warn "ORCH_API tanımlı değil"; return 2; }
+  [ -n "${ORCH_TOKEN:-}" ] || { warn "ORCH_TOKEN tanımlı değil"; return 2; }
+  if [ -n "$body" ]; then
+    curl -sS -X "$m" "$ORCH_API$p" -H "Authorization: Bearer $ORCH_TOKEN" \
+      -H "Content-Type: application/json" --data-binary "$body" \
+      -w '\n%{http_code}' --max-time "${ORCH_TIMEOUT:-30}"
+  else
+    curl -sS -X "$m" "$ORCH_API$p" -H "Authorization: Bearer $ORCH_TOKEN" \
+      -w '\n%{http_code}' --max-time "${ORCH_TIMEOUT:-30}"
+  fi
+}
+
+# orch_api çıktısından HTTP kodunu / gövdeyi ayırır
+http_code_of() { printf '%s' "$1" | tail -n1; }
+http_body_of() { printf '%s' "$1" | sed '$d'; }
 
 # Git repo'yu klonla ya da güncelle
 sync_repo() { # url dest

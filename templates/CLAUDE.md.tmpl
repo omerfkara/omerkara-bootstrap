@@ -16,10 +16,18 @@ Bu dosya `omk init` ile oluşturuldu ({{CREATED_AT}}). Proje tipi: **{{PTYPE}}**
 - `task_mcp` MCP sunucusu varsa HTTP çağrısı yerine onun araçlarını kullan.
 
 ## Deploy
-- Deploy işlemleri **yalnızca orchestrator** üzerinden yapılır; bu repoda fastlane, sertifika veya SSH anahtarı tutulmaz.
-- Hedef tanımı: `deploy.yml`. Runner: `{{DEPLOY_RUNNER}}`.
-- Tetikleme: `main` dalına push → GitHub webhook → orchestrator.
-- Deploy yapılandırmasındaki değişiklikler `DEPLOYMENT` dokümanına da yansıtılır.
+Deploy işlemleri **yalnızca orchestrator** üzerinden yapılır; bu repoda fastlane, sertifika veya SSH anahtarı tutulmaz.
+
+- Tanım dosyası: `deploy.yml` — runner `{{DEPLOY_RUNNER}}`. Orchestrator kaydı ve CLI komutları bu dosyayı okur, ikinci bir yerde tekrarlama.
+- Tetikleme (CLI):
+  - `omk deploy --env staging` — staging ortamına deploy
+  - `omk deploy --env production --wait` — bitene kadar durumu izler
+  - `omk deploy --ref <dal|commit>` — belirli bir referansı gönderir
+  - `omk deploy --dry-run` — gövdeyi gösterir, göndermez
+- Durum: `omk status` (bu proje) · `omk status --all -n 20` (tüm projeler)
+- Otomatik tetikleme: `main` dalına push → GitHub webhook → orchestrator.
+- Deploy hedefi, runner ya da ortam değiştiğinde `deploy.yml`'i güncelle **ve** değişikliği `DEPLOYMENT` dokümanına `POST /documents/upsert` ile yansıt.
+- Deploy başarısızsa logu orchestrator panelinden oku; sertifika/secret sorunlarını bu repoda çözmeye çalışma, orchestrator tarafına aittir.
 
 ## Güvenlik
 - Token ve parolalar asla commit edilmez. Makine credential'ları `~/.config/omerkara/credentials` içindedir.

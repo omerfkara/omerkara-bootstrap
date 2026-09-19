@@ -44,6 +44,12 @@ omk init harf-harbi --type api --dir .              # mevcut klonda (başka maki
 omk init test-app --dry-run                         # sadece göster
 omk doctor                                          # kontrol
 omk update                                          # bootstrap + skill + mcp güncelle
+
+omk deploy --env staging                            # orchestrator'a deploy
+omk deploy --env production --wait                  # bitene kadar izle
+omk deploy --ref hotfix/1 --dry-run                 # gövdeyi göster, gönderme
+omk status                                          # bu projenin son deploy'ları
+omk status --all -n 20                              # tüm projeler
 ```
 
 | `--type` | Runner |
@@ -81,10 +87,14 @@ Komut tekrar çalıştırılabilir; her çalıştırmada eksik olanı tamamlar.
 | `TASK_API` | `https://n8n.omerkara.com/webhook` | Task API adresi |
 | `ORCH_API` | – | Orchestrator adresi (örn. `https://orchestrator.omerkara.com`) |
 | `ORCH_REGISTER_PATH` | `/projects` | Proje kayıt endpoint'i |
+| `ORCH_DEPLOY_PATH` | `/deployments` | Deploy tetikleme / listeleme endpoint'i |
+| `ORCH_HEALTH_PATH` | `/health` | Sağlık kontrolü endpoint'i |
 | `ORCH_WEBHOOK_URL` / `ORCH_WEBHOOK_SECRET` | – | GitHub webhook ayarları |
 | `OMK_GITHUB_USER` | `omerfkara` | Repo sahibi |
 
 Kalıcı ayarlar `~/.config/omerkara/config` dosyasında tutulur (KEY='value').
+Öncelik sırası: **ortam değişkeni > credentials > config > varsayılan** — yani tek
+seferlik `ORCH_API=https://... omk status` çalışır.
 
 ## Yeni skill eklemek
 
@@ -94,17 +104,51 @@ Kalıcı ayarlar `~/.config/omerkara/config` dosyasında tutulur (KEY='value').
 omerkara-deploy|https://github.com/omerfkara/omerkara-deploy.git|no
 ```
 
-## Orchestrator tarafında beklenen API
+## Orchestrator
 
-Orchestrator'da henüz yoksa eklenmesi gereken uçlar:
+Deploy tanımının tek kaynağı projedeki `deploy.yml`'dir; hem orchestrator kaydı hem de
+`omk deploy` bu dosyayı okur. Sertifika, SSH anahtarı ve store credential'ları
+orchestrator'da durur, proje repolarında değil.
 
 ```
-POST /projects      Authorization: Bearer <ORCH_TOKEN>
-{ "name": "...", "type": "web", "runner": "ubuntu", "repo": "omerfkara/..." }
-→ 201 oluşturuldu / 409 zaten var
-
-GET /health         → 200
+omk deploy [proje] [--env <ortam>] [--ref <dal|commit>] [--wait] [--dry-run]
+omk status [proje] [-n <adet>] [--all]
 ```
+
+`--env` verildiğinde referans `deploy.yml`'deki o ortamın `branch` değerinden alınır;
+`--ref` her zaman onu ezer. `--wait`, deployment `done/success` ya da `failed/error`
+olana kadar durumu yoklar (`OMK_WAIT_INTERVAL`, `OMK_WAIT_MAX` ile ayarlanır).
+
+### Beklenen API
+
+Uç nokta yolları ortam değişkeniyle değiştirilebilir; orchestrator farklı bir şema
+kullanıyorsa kod değil yalnızca bu değerler değişir. Yetkilendirme her istekte
+`Authorization: Bearer $ORCH_TOKEN`.
+
+```
+POST $ORCH_API$ORCH_REGISTER_PATH        # varsayılan /projects
+{ "project": "...", "repo": "omerfkara/...", "type": "web", "runner": "ubuntu", "ref": "main" }
+→ 2xx oluşturuldu · 409 zaten var
+
+POST $ORCH_API$ORCH_DEPLOY_PATH          # varsayılan /deployments
+{ "project": "...", "ref": "main", "environment": "production", "trigger": "cli", ... }
+→ 2xx { "id": "...", "status": "queued" }
+
+GET  $ORCH_API$ORCH_DEPLOY_PATH/<id>     # --wait bunu yoklar
+→ 2xx { "id": "...", "status": "running|done|failed" }
+
+GET  $ORCH_API$ORCH_DEPLOY_PATH?project=<ad>&limit=<n>
+→ 2xx [ { project, server, status, trigger, timestamp }, ... ]
+
+GET  $ORCH_API$ORCH_HEALTH_PATH          # varsayılan /health, omk doctor kullanır
+→ 2xx
+```
+
+Yanıt biçimi esnektir: düz liste, `{"deployments": [...]}`, `{"data": [...]}` ya da
+n8n'in `[{"json": {...}}]` biçimi kabul edilir. Alan adları da esnektir —
+`server`/`runner`/`target`, `status`/`state`, `created_at`/`timestamp` gibi karşılıklar
+`lib/orch.py` içindeki `FIELDS` tablosunda tutulur; yeni bir ad çıkarsa oraya bir satır
+eklemek yeter.
 
 ## Gereksinimler
 
@@ -118,6 +162,7 @@ GET /health         → 200
 bin/omk            CLI (setup / init / update / doctor)
 lib/common.sh      yardımcı fonksiyonlar (bash 3.2 uyumlu)
 lib/docs.py        Task API doküman yanıtı ayrıştırıcı
+lib/orch.py        deploy.yml ayrıştırıcı + orchestrator yanıt biçimlendirici
 templates/         proje şablonları ({{PROJECT}} gibi yer tutucular)
 skills.txt         kurulacak skill'ler
 install.sh         curl | bash giriş noktası
