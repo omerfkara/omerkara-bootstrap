@@ -48,8 +48,10 @@ init opsiyonları:
 
 deploy opsiyonları:
   --wait                    Bitene kadar durumu izle, hata halinde logu göster
+  --env <dosya>             Dosyadaki değişkenleri vault'a yazar, yayılmasını bekler
   --dry-run                 İsteği göster, gönderme
   (deploy normalde main'e push ile tetiklenir; bu komut elle tetikler)
+  (proje orchestrator'da kayıtlı değilse deploy.yml'den kaydeder ve bekler)
 
 token opsiyonları:
   --task                    TASK_TOKEN (varsayılan)
@@ -348,16 +350,91 @@ create_github_repo() {
     fi
     run gh repo create "$GITHUB_REPO" --private --source . --remote origin --push && ok "GitHub: $GITHUB_REPO"
   fi
-  if [ -n "${ORCH_WEBHOOK_URL:-}" ] && [ -n "${ORCH_WEBHOOK_SECRET:-}" ]; then
-    if gh api "repos/$GITHUB_REPO/hooks" --jq '.[].config.url' 2>/dev/null | grep -qxF "$ORCH_WEBHOOK_URL"; then
-      dim "Webhook zaten var"
-    else
-      run gh api "repos/$GITHUB_REPO/hooks" -X POST -f name=web \
-        -f "config[url]=$ORCH_WEBHOOK_URL" -f "config[content_type]=json" \
-        -f "config[secret]=$ORCH_WEBHOOK_SECRET" -f "events[]=push" -F active=true >/dev/null \
-        && ok "Orchestrator webhook'u eklendi"
+  # Repo başına webhook eklenmez: orchestrator'ın GitHub App'i hesaptaki tüm
+  # repoların push'larını alıyor (2026-09-20'de repo hook'ları kaldırıldı).
+  # Repo hook'u eklemek aynı push'un iki kez tetiklenmesine yol açar.
+}
+
+
+# ---------------------------------------------------------------- bağlantı
+# Kayıt ile projenin servise ulaşması arasında dakikalar var: POST /api/projects
+# GitHub'a commit atar, CI imajı yeniden kurar, Pi çeker. Bu yüzden kayıttan
+# sonra beklemek şart, yoksa init/deploy 404 alır.
+wait_project_live() { # proje
+  n=0
+  info "Kaydın yayılması bekleniyor (CI + Pi pull, birkaç dakika sürebilir)"
+  while [ "$n" -lt "${OMK_PROPAGATE_MAX:-40}" ]; do
+    resp="$(orch_api GET "$ORCH_REGISTER_PATH")" || { warn "proje listesi okunamadı"; return 1; }
+    if [ "$(http_code_of "$resp")" = "200" ] &&
+       http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" has-project "$1" >/dev/null 2>&1; then
+      ok "Proje orchestrator'da görünüyor"; return 0
     fi
+    n=$((n+1)); sleep "${OMK_PROPAGATE_INTERVAL:-20}"
+  done
+  warn "Yayılma zaman aşımı — birazdan 'omk deploy' ile tekrar dene"
+  return 1
+}
+
+project_registered() { # proje
+  resp="$(orch_api GET "$ORCH_REGISTER_PATH")" || die "Orchestrator'a ulaşılamadı"
+  case "$(http_code_of "$resp")" in
+    2??) ;;
+    401|403) die "Yetki reddedildi — ORCH_TOKEN ya da CF Access servis token'ı geçersiz" ;;
+    *) die "Proje listesi okunamadı (HTTP $(http_code_of "$resp"))" ;;
+  esac
+  http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" has-project "$1" >/dev/null 2>&1
+}
+
+register_from_deploy_yml() { # deploy.yml yolu
+  body="$(python3 "$BOOT_DIR/lib/orch.py" register "$1")" || die "deploy.yml eksik ya da okunamadı: $1"
+  if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_REGISTER_PATH  $body"; return 0; fi
+  info "Proje orchestrator'a kaydediliyor"
+  resp="$(orch_api POST "$ORCH_REGISTER_PATH" "$body")" || die "Orchestrator'a ulaşılamadı"
+  case "$(http_code_of "$resp")" in
+    2??) ok "Kaydedildi" ;;
+    409) die "Bu adla kayıtlı bir proje zaten var. Var olan bir projeyi güncellemek ONBOARD_TOKEN ile yapılamaz; API_TOKEN gerekir (dashboard ya da doğrudan API)." ;;
+    422) die "Orchestrator gövdeyi reddetti (422): $(http_body_of "$resp" | head -c 300)" ;;
+    401|403) die "Yetki reddedildi — ORCH_TOKEN ya da CF Access servis token'ı geçersiz" ;;
+    *)   die "Kayıt başarısız (HTTP $(http_code_of "$resp")): $(http_body_of "$resp" | head -c 300)" ;;
+  esac
+}
+
+# .env'i vault'a gönderir. Değerler hiçbir zaman ekrana/log'a yazılmaz.
+push_env_file() { # proje  dosya
+  [ -f "$2" ] || die "env dosyası yok: $2"
+  body="$(python3 "$BOOT_DIR/lib/orch.py" envbody "$2")" || die "env dosyası okunamadı: $2"
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    dim "[dry-run] POST $ORCH_API/api/env/$(urlencode "$1")  ($(grep -c '^[A-Za-z_]' "$2") değişken)"; return 0
   fi
+  before="$(orch_version)"
+  info "Env vault'a gönderiliyor ($(grep -c '^[A-Za-z_]' "$2") değişken)"
+  resp="$(orch_api POST "/api/env/$(urlencode "$1")" "$body")" || die "Orchestrator'a ulaşılamadı"
+  case "$(http_code_of "$resp")" in
+    2??) ok "Env kaydedildi" ;;
+    404) die "Proje orchestrator'da kayıtlı değil: $1" ;;
+    400) die "Env içeriği boş görünüyor: $2" ;;
+    *)   die "Env gönderilemedi (HTTP $(http_code_of "$resp")): $(http_body_of "$resp" | head -c 200)" ;;
+  esac
+  # Vault imajın içinde: init'in yeni env'i görmesi için imajın yayılması gerekir
+  wait_orch_version_change "$before"
+}
+
+orch_version() {
+  resp="$(orch_api GET /api/version 2>/dev/null)" || return 0
+  http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" field version 2>/dev/null || true
+}
+
+wait_orch_version_change() { # önceki sürüm
+  [ -n "$1" ] || { dim "sürüm okunamadı — env yayılması beklenmeden devam ediliyor"; return 0; }
+  n=0
+  info "Env'in yayılması bekleniyor (vault imaja giriyor)"
+  while [ "$n" -lt "${OMK_PROPAGATE_MAX:-40}" ]; do
+    cur="$(orch_version)"
+    [ -n "$cur" ] && [ "$cur" != "$1" ] && { ok "Env yayıldı (sürüm $cur)"; return 0; }
+    n=$((n+1)); sleep "${OMK_PROPAGATE_INTERVAL:-20}"
+  done
+  warn "Env yayılma zaman aşımı — init 'vault has no env' derse birazdan tekrar dene"
+  return 0
 }
 
 # ---------------------------------------------------------------- deploy
@@ -381,10 +458,11 @@ find_deploy_yml() {
 }
 
 cmd_deploy() {
-  WAIT=0; PROJECT=""
+  WAIT=0; PROJECT=""; ENV_FILE=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --wait)    WAIT=1; shift ;;
+      --env)     ENV_FILE="${2:-}"; [ -n "$ENV_FILE" ] || die "--env için dosya adı gerekli"; shift 2 ;;
       --dry-run) DRY_RUN=1; shift ;;
       -h|--help) usage; return 0 ;;
       -*) die "Bilinmeyen opsiyon: $1" ;;
@@ -395,18 +473,35 @@ cmd_deploy() {
   load_credentials
   [ -n "${ORCH_API:-}" ] || no_orch_api
 
+  yml=""
   if [ -z "$PROJECT" ]; then
     yml="$(find_deploy_yml)" || die "deploy.yml bulunamadı. Proje klasöründe misiniz? (omk init ... --type <tip> ile oluşur)"
     dim "tanım: $yml"
     PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" project "$yml")" || die "deploy.yml okunamadı"
+  else
+    yml="$(find_deploy_yml 2>/dev/null || true)"
   fi
+
 
   # Orchestrator'da ayrı bir deploy ucu yok: normalde push + GitHub App tetikler.
   # Elle tetikleme, projenin init ucuna deploy:true göndermekle yapılır.
   path="$ORCH_REGISTER_PATH/$(urlencode "$PROJECT")/init"
   if [ "$DRY_RUN" = "1" ]; then
+    [ -n "$ENV_FILE" ] && dim "[dry-run] POST $ORCH_API/api/env/$(urlencode "$PROJECT")"
     dim "[dry-run] POST $ORCH_API$path"; echo '{"deploy": true}'; return 0
   fi
+
+  # 1) Kayıt: env yazmak da init de kayıtlı proje ister (ikisi de 404 döner),
+  #    bu yüzden ilk adım kaydın varlığını doğrulamak.
+  if ! project_registered "$PROJECT"; then
+    [ -n "$yml" ] || die "Proje orchestrator'da kayıtlı değil: $PROJECT ve deploy.yml bulunamadı"
+    warn "Proje orchestrator'da kayıtlı değil — deploy.yml'den kaydediliyor"
+    register_from_deploy_yml "$yml"
+    wait_project_live "$PROJECT" || exit 1
+  fi
+
+  # 2) Env: init, vault'taki blob'u runner'a yazar; önce göndermek gerekir
+  [ -n "$ENV_FILE" ] && push_env_file "$PROJECT" "$ENV_FILE"
 
   info "Deploy tetikleniyor: $PROJECT"
   resp="$(orch_api POST "$path" '{"deploy": true}')" || die "Orchestrator'a ulaşılamadı"
@@ -414,7 +509,9 @@ cmd_deploy() {
   case "$code" in
     2??) ;;
     401|403) die "Yetki reddedildi (HTTP $code) — ORCH_TOKEN ya da CF Access servis token'ı geçersiz" ;;
-    404) die "Proje orchestrator'da kayıtlı değil: $PROJECT (önce: omk init $PROJECT --dir . --type <tip>)" ;;
+    404) die "Proje az önce kaydedildi ama servis henüz görmüyor — birkaç dakika sonra: omk deploy" ;;
+    422) die "Orchestrator init'i reddetti (422): $(printf '%s' "$out" | head -c 300)
+deploy.yml'de repo_path dolu mu? (runner üzerindeki checkout dizini)" ;;
     *) die "Deploy başlatılamadı (HTTP $code): $(printf '%s' "$out" | head -c 300)" ;;
   esac
   id="$(printf '%s' "$out" | python3 "$BOOT_DIR/lib/orch.py" field id 2>/dev/null || true)"

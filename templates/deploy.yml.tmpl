@@ -6,9 +6,25 @@ name: {{PROJECT}}
 git_url: https://github.com/{{GITHUB_REPO}}.git
 target_runner: {{DEPLOY_RUNNER}}        # macos | ubuntu | pi
 
-# Runner üzerinde çalışacak komutlar
+# Runner üzerindeki checkout dizini (mutlak yol). 'omk deploy' ilk bağlantıda
+# repoyu buraya klonlar; boşsa orchestrator 422 döner.
+#   pi/ubuntu → /home/omer/{{PROJECT}}     macos → /Users/omer/projects/{{PROJECT}}
+repo_path: ""
+
+# Runner üzerinde çalışacak komutlar. Her ikisi ayrı SSH kabuğunda çalışır:
+# cd ve export birinden diğerine taşınmaz, PATH dardır.
+# Desenler: https://orchestrator.omerkara.com/docs (bölüm 2b)
 build_command: ""
 deploy_command: ""
+
+# Projenin .env'i (mutlak yol). Orchestrator her deploy öncesi vault'taki
+# env:{{PROJECT}} blob'unu buraya yazar. Değerleri göndermek için:
+#   omk deploy --env .env
+env_file: ""
+
+# Yalnızca iOS/TestFlight: Apple credential'larının yazılacağı dizin
+# (runner'da önceden 'mkdir -p -m 700' ile açılmış olmalı)
+# ios_secrets_dir: ""
 
 # Değişiklik bu yolların dışındaysa push deploy tetiklemez (boş = her değişiklik)
 watch_paths: ""

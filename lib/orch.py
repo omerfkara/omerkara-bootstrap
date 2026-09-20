@@ -6,6 +6,8 @@ Kullanım:
   orch.py project  deploy.yml           → proje adı
   orch.py table  < yanit.json             → deployment listesini tablo olarak yaz
   orch.py field  <ad> < yanit.json        → tek alanı yaz (id, status ...)
+  orch.py has-project <ad> < liste.json   → proje listede mi (çıkış kodu)
+  orch.py envbody <.env>                  → POST /api/env/<proje> gövdesi
 
 Yanıt biçimine toleranslıdır: [...], {"deployments": [...]}, {"data": [...]}
 veya n8n'in [{"json": {...}}] biçimi.
@@ -101,14 +103,18 @@ def cmd_register(argv):
     """deploy.yml → POST /api/projects gövdesi.
 
     Orchestrator'ın beklediği alanlar: name, git_url, target_runner,
-    build_command, deploy_command (+ watch_paths, environment, notifications).
-    Göndermediğimiz alanlar orchestrator tarafında korunuyor, bu yüzden boş
-    değerler gövdeye hiç konmaz.
+    build_command, deploy_command (+ repo_path, env_file, ios_secrets_dir,
+    watch_paths, environment, notifications). Boş değerler gövdeye konmaz.
+
+    repo_path, runner üzerindeki checkout dizinidir; init (ilk clone) onsuz
+    422 döner. env_file verilirse orchestrator her deploy öncesi vault'taki
+    env:<proje> blob'unu o yola yazar.
     """
     spec = parse_yaml(argv[0])
     body = {}
     for key in ("name", "git_url", "target_runner", "build_command",
-                "deploy_command", "environment", "notifications"):
+                "deploy_command", "repo_path", "env_file", "ios_secrets_dir",
+                "environment", "notifications"):
         val = spec.get(key)
         if isinstance(val, str) and val.strip():
             body[key] = val.strip()
@@ -161,13 +167,46 @@ def cmd_field(argv):
         print(pick(data[0], argv[0]))
 
 
+def cmd_has_project(argv):
+    """stdin'deki proje listesinde ad var mı? (çıkış kodu: 0 var, 1 yok)
+
+    'omk deploy' ilk bağlantıda kaydın yayılmasını bununla bekler."""
+    if not argv:
+        print("! kullanım: orch.py has-project <ad>", file=sys.stderr)
+        sys.exit(2)
+    name = argv[0]
+    for row in load_stdin():
+        if pick(row, "project") == name:
+            sys.exit(0)
+    sys.exit(1)
+
+
+def cmd_envbody(argv):
+    """.env dosyası → POST /api/env/<proje> gövdesi.
+
+    Dosya olduğu gibi gönderilir (yorumlar dahil); değerler hiçbir yere
+    yazdırılmaz. Boş dosya orchestrator tarafından reddedilir, burada da
+    erken hata veririz."""
+    if not argv:
+        print("! kullanım: orch.py envbody <dosya>", file=sys.stderr)
+        sys.exit(2)
+    with open(argv[0], "r", encoding="utf-8") as handle:
+        content = handle.read()
+    if not any("=" in line and not line.lstrip().startswith("#")
+               for line in content.splitlines()):
+        print("! env dosyasında değişken yok: " + argv[0], file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"content": content}))
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     mode, argv = sys.argv[1], sys.argv[2:]
     handlers = {"register": cmd_register, "project": cmd_project,
-                "table": cmd_table, "field": cmd_field}
+                "table": cmd_table, "field": cmd_field,
+                "has-project": cmd_has_project, "envbody": cmd_envbody}
     if mode not in handlers:
         print(f"bilinmeyen mod: {mode}", file=sys.stderr)
         sys.exit(2)
