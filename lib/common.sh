@@ -121,6 +121,16 @@ read_secret() { # var_name prompt op_ref_var
   printf '%s' "$val"
 }
 
+# Gizli olmayan bir değer sorar (URL vb.). Boş geçilebilir.
+ask_plain() { # prompt
+  val=""
+  if ( : < /dev/tty ) 2>/dev/null; then
+    printf '%s: ' "$1" > /dev/tty
+    IFS= read -r val < /dev/tty || true
+  fi
+  printf '%s' "$val" | tr -d '[:space:]'
+}
+
 # Anahtar dosyada kayıtlı mı?
 has_kv() { [ -f "$1" ] && grep -q "^$2=" "$1"; }
 

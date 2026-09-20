@@ -84,10 +84,22 @@ cmd_setup() {
   ensure_token ORCH_TOKEN "ORCH_TOKEN (orchestrator, boş geçilebilir)" OMK_OP_ORCH_TOKEN no
 
   # --- Makine config (secret olmayan)
-  if [ ! -f "$OMK_CONF_FILE" ]; then
-    run set_kv "$OMK_CONF_FILE" TASK_API "$TASK_API"
-    [ -n "${ORCH_API:-}" ] && run set_kv "$OMK_CONF_FILE" ORCH_API "$ORCH_API"
-    ok "Config yazıldı: $OMK_CONF_FILE"
+  # Anahtar bazında bak: "dosya varsa tümünü atla" mantığı, config bir kez
+  # oluştuktan sonra ORCH_API'nin hiç sorulmamasına yol açıyordu.
+  has_kv "$OMK_CONF_FILE" TASK_API || run set_kv "$OMK_CONF_FILE" TASK_API "$TASK_API"
+  if has_kv "$OMK_CONF_FILE" ORCH_API; then
+    dim "ORCH_API kayıtlı"
+  elif [ -n "${ORCH_API:-}" ]; then
+    run set_kv "$OMK_CONF_FILE" ORCH_API "$ORCH_API"
+    ok "ORCH_API kaydedildi"
+  else
+    a="$(ask_plain "ORCH_API (orchestrator adresi, boş geçilebilir)")"
+    if [ -n "$a" ]; then
+      run set_kv "$OMK_CONF_FILE" ORCH_API "$a"; export ORCH_API="$a"
+      ok "ORCH_API kaydedildi"
+    else
+      dim "ORCH_API atlandı — deploy komutları devre dışı kalır"
+    fi
   fi
 
   install_skills
@@ -210,9 +222,9 @@ cmd_init() {
   [ -d .git ] || run git init -q -b main 2>/dev/null || run git init -q
 
   # --- Uzak dokümanlar varsa önce indir (ikinci makine senaryosu)
-  REMOTE_DOCS=""
+  REMOTE_DOCS=""; DOCS_SYNCED=0
   if [ "$REMOTE" = "1" ] && [ -n "${TASK_TOKEN:-}" ]; then
-    pull_remote_docs || warn "Task API'den dokümanlar alınamadı."
+    if pull_remote_docs; then DOCS_SYNCED=1; else warn "Task API'den dokümanlar alınamadı."; fi
   fi
 
   # --- Şablonlar
@@ -265,6 +277,12 @@ pull_remote_docs() {
 # Yerelde olup uzakta olmayan dokümanları gönderir (uzaktakinin üzerine yazmaz)
 push_docs() {
   [ -n "${TASK_TOKEN:-}" ] || { warn "TASK_TOKEN yok, dokümanlar gönderilmedi"; return 0; }
+  # Uzak liste okunamadıysa "uzakta yok" sanıp yeni oluşturulmuş boş şablonları
+  # göndermek uzaktaki gerçek dokümanı ezebilir. Okuyamadıysak hiç gönderme.
+  [ "${DOCS_SYNCED:-0}" = "1" ] || {
+    warn "Uzak dokümanlar okunamadı — yerel şablonların uzaktakini ezmemesi için gönderim atlandı"
+    return 0
+  }
   for n in ${OMK_SYNC_DOCS:-PROMPT SCOPE}; do
     if printf '%s\n' $REMOTE_DOCS | grep -qx "$(doc_key "$n")"; then dim "uzakta mevcut: $n"; continue; fi
     [ -f "docs/$n.md" ] || continue
@@ -278,6 +296,7 @@ push_docs() {
 # Proje ilk kez oluşturuluyorsa bir başlangıç task'ı açar
 ensure_first_task() {
   [ -n "${TASK_TOKEN:-}" ] || return 0
+  [ "${DOCS_SYNCED:-0}" = "1" ] || return 0
   [ -n "$REMOTE_DOCS" ] && return 0     # proje zaten vardı
   existing="$(task_api GET "/tasks?project=$(urlencode "$PROJECT")&status=all" 2>/dev/null || echo '[]')"
   if printf '%s' "$existing" | python3 -c 'import json,sys
@@ -336,6 +355,15 @@ create_github_repo() {
 }
 
 # ---------------------------------------------------------------- deploy
+# ORCH_API yoksa ne yapılacağını somut söyle (eskiden 'omk setup' diyordu ama
+# setup, config dosyası zaten varken bu değeri sormuyordu)
+no_orch_api() {
+  warn "ORCH_API tanımlı değil — orchestrator adresi bilinmiyor"
+  dim "omk setup      (artık soruyor)"
+  dim "ya da: echo \"ORCH_API='https://orchestrator...'\" >> $OMK_CONF_FILE"
+  exit 1
+}
+
 # deploy.yml'i bulur ve mutlak yolunu yazar (proje kökünü yukarı doğru arar)
 find_deploy_yml() {
   d="$PWD"
@@ -361,7 +389,7 @@ cmd_deploy() {
   done
   export DRY_RUN="${DRY_RUN:-0}"
   load_credentials
-  [ -n "${ORCH_API:-}" ] || die "ORCH_API tanımlı değil. Ayarlamak için: omk setup ya da ~/.config/omerkara/config"
+  [ -n "${ORCH_API:-}" ] || no_orch_api
 
   yml="$(find_deploy_yml)" || die "deploy.yml bulunamadı. Proje klasöründe misiniz? (omk init ... --type <tip> ile oluşur)"
   dim "tanım: $yml"
@@ -415,7 +443,7 @@ cmd_status() {
     esac
   done
   load_credentials
-  [ -n "${ORCH_API:-}" ] || die "ORCH_API tanımlı değil."
+  [ -n "${ORCH_API:-}" ] || no_orch_api
   if [ "$ALL" != "1" ] && [ -z "$PROJECT" ]; then
     yml="$(find_deploy_yml)" && PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" body "$yml" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("project",""))')" || PROJECT=""
   fi
@@ -573,6 +601,16 @@ cmd_doctor() {
     *":$HOME/.local/bin:"*) ok "$HOME/.local/bin PATH'te" ;;
     *) warn "$HOME/.local/bin PATH'te değil (yeni terminal açın ya da omk setup)"; fail=1 ;;
   esac
+  # Eski terminal tuzağı: ortam değişkeni dosyadakini ezer, dolayısıyla
+  # credentials düzeltilse bile açık kabuklar eski değeri taşımaya devam eder.
+  if [ -f "$OMK_CRED_FILE" ] && [ -n "${TASK_TOKEN:-}" ]; then
+    file_tok="$(awk -F"'" '/^TASK_TOKEN=/{print $2}' "$OMK_CRED_FILE" 2>/dev/null || true)"
+    if [ -n "$file_tok" ] && [ "$file_tok" != "$TASK_TOKEN" ]; then
+      warn "Kabuktaki TASK_TOKEN dosyadakinden farklı (${#TASK_TOKEN} / ${#file_tok} karakter)"
+      dim "bu kabuk eski değeri taşıyor → yeni terminal ya da: set -a; . \"$OMK_CRED_FILE\"; set +a"
+      fail=1
+    fi
+  fi
   # Genişlememiş değişken kontrolü: Task API'de '$TASK_PROJECT' adlı proje bu yüzden oluşuyor
   val=""
   for v in TASK_PROJECT TASK_API TASK_TOKEN; do

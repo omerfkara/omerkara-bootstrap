@@ -17,7 +17,9 @@ Kurulum şunları yapar:
 
 1. Bu repoyu `~/.omerkara/bootstrap` altına klonlar.
 2. Token'ları `~/.config/omerkara/credentials` dosyasına yazar (chmod 600). Sırayla şu kaynaklara bakar: ortam değişkeni, ardından 1Password, ardından kullanıcıya sorar.
-3. `skills.txt` içindeki skill'leri `~/.claude/skills/` altına kurar.
+3. `skills.txt` içindeki skill'leri `~/.claude/skills/` altına kurar. Kayıtlı değilse
+   `ORCH_API` (orchestrator adresi) sorulur; boş geçilebilir, deploy komutları o
+   zaman devre dışı kalır.
 4. Task MCP için kurulum yapmaz — uzak bir sunucudur ve OAuth ile kimlik doğrular.
    Eskiden klonlanmış yerel bir kopya varsa uyarır (silinebilir).
 5. `~/.zshrc` / `~/.bashrc` dosyasına credential yükleyen bir blok ekler; `omk` ve
