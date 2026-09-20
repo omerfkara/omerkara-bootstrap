@@ -52,7 +52,7 @@ require_cmds() {
 }
 
 # Ortamdan gelen değerlerin dosyadakini ezmesi gereken anahtarlar
-OMK_OVERRIDABLE="TASK_TOKEN ORCH_TOKEN TASK_API TASK_MCP_URL ORCH_API ORCH_REGISTER_PATH ORCH_DEPLOY_PATH ORCH_HEALTH_PATH TASK_PROJECT"
+OMK_OVERRIDABLE="TASK_TOKEN ORCH_TOKEN TASK_API TASK_MCP_URL ORCH_API ORCH_REGISTER_PATH ORCH_DEPLOY_PATH ORCH_STATUS_PATH ORCH_LOGS_PATH ORCH_HEALTH_PATH CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET TASK_PROJECT"
 
 # Makine seviyesi credential ve config dosyalarını yükler.
 # Öncelik: ortam değişkeni > credentials > config > varsayılan.
@@ -82,9 +82,14 @@ load_credentials() {
   # Task MCP uzak sunucu, OAuth ile kimlik doğrular — .mcp.json'a token yazılmaz
   export TASK_MCP_URL="${TASK_MCP_URL:-https://tasks.omerkara.com/api/mcp}"
   export ORCH_API="${ORCH_API:-}"
-  export ORCH_REGISTER_PATH="${ORCH_REGISTER_PATH:-/projects}"
-  export ORCH_DEPLOY_PATH="${ORCH_DEPLOY_PATH:-/deployments}"
+  export ORCH_REGISTER_PATH="${ORCH_REGISTER_PATH:-/api/projects}"
+  export ORCH_DEPLOY_PATH="${ORCH_DEPLOY_PATH:-/api/deployments}"
+  export ORCH_STATUS_PATH="${ORCH_STATUS_PATH:-/api/status}"
+  export ORCH_LOGS_PATH="${ORCH_LOGS_PATH:-/api/logs}"
   export ORCH_HEALTH_PATH="${ORCH_HEALTH_PATH:-/health}"
+  # Orchestrator Cloudflare Access arkasında: Bearer'a ek olarak servis token'ı
+  export CF_ACCESS_CLIENT_ID="${CF_ACCESS_CLIENT_ID:-}"
+  export CF_ACCESS_CLIENT_SECRET="${CF_ACCESS_CLIENT_SECRET:-}"
 }
 
 # Değeri güvenli şekilde KEY=VALUE dosyasına yazar/günceller
@@ -119,6 +124,16 @@ read_secret() { # var_name prompt op_ref_var
     printf '\n' > /dev/tty
   fi
   printf '%s' "$val"
+}
+
+# Gizli olmayan bir değer sorar (URL vb.). Boş geçilebilir.
+ask_plain() { # prompt
+  val=""
+  if ( : < /dev/tty ) 2>/dev/null; then
+    printf '%s: ' "$1" > /dev/tty
+    IFS= read -r val < /dev/tty || true
+  fi
+  printf '%s' "$val" | tr -d '[:space:]'
 }
 
 # Anahtar dosyada kayıtlı mı?
@@ -165,20 +180,25 @@ http_ping() { # url [timeout]
   printf '%s' "$code"
 }
 
+# http_ping'in başlıklı sürümü (ör. X-Task-Token ile yetkili yoklama)
+http_ping_auth() { # url header [timeout]
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -H "$2" --max-time "${3:-15}" "$1" 2>/dev/null || true)"
+  case "$code" in ''|*[!0-9]*) code=000 ;; esac
+  printf '%s' "$code"
+}
+
 # Orchestrator API çağrısı: method path [json_body]
 # Gövdeyi stdout'a, HTTP kodunu son satıra yazar.
 orch_api() {
   m="$1"; p="$2"; body="${3:-}"
   [ -n "${ORCH_API:-}" ]   || { warn "ORCH_API tanımlı değil"; return 2; }
   [ -n "${ORCH_TOKEN:-}" ] || { warn "ORCH_TOKEN tanımlı değil"; return 2; }
-  if [ -n "$body" ]; then
-    curl -sS -X "$m" "$ORCH_API$p" -H "Authorization: Bearer $ORCH_TOKEN" \
-      -H "Content-Type: application/json" --data-binary "$body" \
-      -w '\n%{http_code}' --max-time "${ORCH_TIMEOUT:-30}"
-  else
-    curl -sS -X "$m" "$ORCH_API$p" -H "Authorization: Bearer $ORCH_TOKEN" \
-      -w '\n%{http_code}' --max-time "${ORCH_TIMEOUT:-30}"
-  fi
+  # Cloudflare Access servis token'ı varsa eklenir; /health dışındaki uçlar ister
+  set -- -sS -X "$m" "$ORCH_API$p" -H "Authorization: Bearer $ORCH_TOKEN"
+  [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && set -- "$@" -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID"
+  [ -n "${CF_ACCESS_CLIENT_SECRET:-}" ] && set -- "$@" -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
+  [ -n "$body" ] && set -- "$@" -H "Content-Type: application/json" --data-binary "$body"
+  curl "$@" -w '\n%{http_code}' --max-time "${ORCH_TIMEOUT:-30}"
 }
 
 # orch_api çıktısından HTTP kodunu / gövdeyi ayırır

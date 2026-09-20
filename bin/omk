@@ -33,6 +33,8 @@ Komutlar:
   omk update                Bootstrap, skill'ler ve task-mcp'yi günceller
   omk deploy [proje]        Orchestrator üzerinden deploy tetikler
   omk status [proje]        Son deployment'ları listeler
+  omk logs <id> [satır]     Bir deployment'ın logunu gösterir
+  omk token [--task|--orch] Token'ı yeniler: sorar, doğrular, sonra kaydeder
   omk doctor [proje]        Bağımlılık, token ve API erişimini kontrol eder
   omk help
 
@@ -45,10 +47,15 @@ init opsiyonları:
   --dry-run                 Yapılacakları gösterir, değişiklik yapmaz
 
 deploy opsiyonları:
-  --env <ortam>             deploy.yml'deki ortam (ör. staging, production)
-  --ref <dal|commit>        Gönderilecek referans (varsayılan: ortamın branch'i)
-  --wait                    Bitene kadar durumu izle
-  --dry-run                 Gövdeyi göster, gönderme
+  --wait                    Bitene kadar durumu izle, hata halinde logu göster
+  --dry-run                 İsteği göster, gönderme
+  (deploy normalde main'e push ile tetiklenir; bu komut elle tetikler)
+
+token opsiyonları:
+  --task                    TASK_TOKEN (varsayılan)
+  --orch                    ORCH_TOKEN
+  --force                   Doğrulama başarısız olsa da kaydet
+  (etkileşimsiz: OMK_TOKEN_VALUE=... omk token)
 
 status opsiyonları:
   -n <adet>                 Kaç kayıt gösterilsin (varsayılan 10)
@@ -57,7 +64,8 @@ status opsiyonları:
 Ortam değişkenleri (opsiyonel):
   TASK_API, ORCH_API, ORCH_REGISTER_PATH, OMK_GITHUB_USER
   OMK_OP_TASK_TOKEN, OMK_OP_ORCH_TOKEN   1Password referansları (op://...)
-  ORCH_DEPLOY_PATH, ORCH_HEALTH_PATH     Orchestrator uç noktaları
+  ORCH_DEPLOY_PATH, ORCH_STATUS_PATH, ORCH_LOGS_PATH, ORCH_HEALTH_PATH
+  CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET   Cloudflare Access servis token'ı
 USAGE
 }
 
@@ -77,10 +85,29 @@ cmd_setup() {
   ensure_token ORCH_TOKEN "ORCH_TOKEN (orchestrator, boş geçilebilir)" OMK_OP_ORCH_TOKEN no
 
   # --- Makine config (secret olmayan)
-  if [ ! -f "$OMK_CONF_FILE" ]; then
-    run set_kv "$OMK_CONF_FILE" TASK_API "$TASK_API"
-    [ -n "${ORCH_API:-}" ] && run set_kv "$OMK_CONF_FILE" ORCH_API "$ORCH_API"
-    ok "Config yazıldı: $OMK_CONF_FILE"
+  # Anahtar bazında bak: "dosya varsa tümünü atla" mantığı, config bir kez
+  # oluştuktan sonra ORCH_API'nin hiç sorulmamasına yol açıyordu.
+  has_kv "$OMK_CONF_FILE" TASK_API || run set_kv "$OMK_CONF_FILE" TASK_API "$TASK_API"
+  if has_kv "$OMK_CONF_FILE" ORCH_API; then
+    dim "ORCH_API kayıtlı"
+  elif [ -n "${ORCH_API:-}" ]; then
+    run set_kv "$OMK_CONF_FILE" ORCH_API "$ORCH_API"
+    ok "ORCH_API kaydedildi"
+  else
+    a="$(ask_plain "ORCH_API (orchestrator adresi, boş geçilebilir)")"
+    if [ -n "$a" ]; then
+      run set_kv "$OMK_CONF_FILE" ORCH_API "$a"; export ORCH_API="$a"
+      ok "ORCH_API kaydedildi"
+    else
+      dim "ORCH_API atlandı — deploy komutları devre dışı kalır"
+    fi
+  fi
+
+  # Orchestrator Cloudflare Access arkasında: /health dışındaki her uç
+  # Bearer'a ek olarak servis token'ı istiyor
+  if [ -n "${ORCH_API:-}" ]; then
+    ensure_token CF_ACCESS_CLIENT_ID "CF_ACCESS_CLIENT_ID (orchestrator CF Access, boş geçilebilir)" OMK_OP_CF_ID no
+    ensure_token CF_ACCESS_CLIENT_SECRET "CF_ACCESS_CLIENT_SECRET (boş geçilebilir)" OMK_OP_CF_SECRET no
   fi
 
   install_skills
@@ -203,9 +230,9 @@ cmd_init() {
   [ -d .git ] || run git init -q -b main 2>/dev/null || run git init -q
 
   # --- Uzak dokümanlar varsa önce indir (ikinci makine senaryosu)
-  REMOTE_DOCS=""
+  REMOTE_DOCS=""; DOCS_SYNCED=0
   if [ "$REMOTE" = "1" ] && [ -n "${TASK_TOKEN:-}" ]; then
-    pull_remote_docs || warn "Task API'den dokümanlar alınamadı."
+    if pull_remote_docs; then DOCS_SYNCED=1; else warn "Task API'den dokümanlar alınamadı."; fi
   fi
 
   # --- Şablonlar
@@ -258,6 +285,12 @@ pull_remote_docs() {
 # Yerelde olup uzakta olmayan dokümanları gönderir (uzaktakinin üzerine yazmaz)
 push_docs() {
   [ -n "${TASK_TOKEN:-}" ] || { warn "TASK_TOKEN yok, dokümanlar gönderilmedi"; return 0; }
+  # Uzak liste okunamadıysa "uzakta yok" sanıp yeni oluşturulmuş boş şablonları
+  # göndermek uzaktaki gerçek dokümanı ezebilir. Okuyamadıysak hiç gönderme.
+  [ "${DOCS_SYNCED:-0}" = "1" ] || {
+    warn "Uzak dokümanlar okunamadı — yerel şablonların uzaktakini ezmemesi için gönderim atlandı"
+    return 0
+  }
   for n in ${OMK_SYNC_DOCS:-PROMPT SCOPE}; do
     if printf '%s\n' $REMOTE_DOCS | grep -qx "$(doc_key "$n")"; then dim "uzakta mevcut: $n"; continue; fi
     [ -f "docs/$n.md" ] || continue
@@ -271,6 +304,7 @@ push_docs() {
 # Proje ilk kez oluşturuluyorsa bir başlangıç task'ı açar
 ensure_first_task() {
   [ -n "${TASK_TOKEN:-}" ] || return 0
+  [ "${DOCS_SYNCED:-0}" = "1" ] || return 0
   [ -n "$REMOTE_DOCS" ] && return 0     # proje zaten vardı
   existing="$(task_api GET "/tasks?project=$(urlencode "$PROJECT")&status=all" 2>/dev/null || echo '[]')"
   if printf '%s' "$existing" | python3 -c 'import json,sys
@@ -289,12 +323,10 @@ register_orchestrator() {
     return 0
   fi
   # Kayıt gövdesi deploy.yml'den üretilir: tek bir tanım kaynağı olsun
-  if [ -f deploy.yml ]; then
-    body="$(python3 "$BOOT_DIR/lib/orch.py" body deploy.yml)"
-  else
-    body="$(python3 -c 'import json,sys;print(json.dumps({"project":sys.argv[1],"type":sys.argv[2],"runner":sys.argv[3],"repo":sys.argv[4]}))' \
-      "$PROJECT" "$PTYPE" "$DEPLOY_RUNNER" "$GITHUB_REPO")"
-  fi
+  [ -f deploy.yml ] || { dim "deploy.yml yok, orchestrator kaydı atlandı"; return 0; }
+  body="$(python3 "$BOOT_DIR/lib/orch.py" register deploy.yml)" || {
+    warn "deploy.yml eksik — orchestrator kaydı atlandı"; return 0
+  }
   if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_REGISTER_PATH  $body"; return 0; fi
   resp="$(orch_api POST "$ORCH_REGISTER_PATH" "$body")" || { warn "Orchestrator kaydı yapılamadı"; return 0; }
   case "$(http_code_of "$resp")" in
@@ -329,6 +361,15 @@ create_github_repo() {
 }
 
 # ---------------------------------------------------------------- deploy
+# ORCH_API yoksa ne yapılacağını somut söyle (eskiden 'omk setup' diyordu ama
+# setup, config dosyası zaten varken bu değeri sormuyordu)
+no_orch_api() {
+  warn "ORCH_API tanımlı değil — orchestrator adresi bilinmiyor"
+  dim "omk setup      (artık soruyor)"
+  dim "ya da: echo \"ORCH_API='https://orchestrator...'\" >> $OMK_CONF_FILE"
+  exit 1
+}
+
 # deploy.yml'i bulur ve mutlak yolunu yazar (proje kökünü yukarı doğru arar)
 find_deploy_yml() {
   d="$PWD"
@@ -340,11 +381,9 @@ find_deploy_yml() {
 }
 
 cmd_deploy() {
-  DEPLOY_ENV=""; DEPLOY_REF=""; WAIT=0; PROJECT=""
+  WAIT=0; PROJECT=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --env)     need_val --env $#; DEPLOY_ENV="$2"; shift 2 ;;
-      --ref)     need_val --ref $#; DEPLOY_REF="$2"; shift 2 ;;
       --wait)    WAIT=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       -h|--help) usage; return 0 ;;
@@ -354,22 +393,28 @@ cmd_deploy() {
   done
   export DRY_RUN="${DRY_RUN:-0}"
   load_credentials
-  [ -n "${ORCH_API:-}" ] || die "ORCH_API tanımlı değil. Ayarlamak için: omk setup ya da ~/.config/omerkara/config"
+  [ -n "${ORCH_API:-}" ] || no_orch_api
 
-  yml="$(find_deploy_yml)" || die "deploy.yml bulunamadı. Proje klasöründe misiniz? (omk init ... --type <tip> ile oluşur)"
-  dim "tanım: $yml"
-  body="$(python3 "$BOOT_DIR/lib/orch.py" body "$yml" "$DEPLOY_REF" "$DEPLOY_ENV")"
-  [ -n "$PROJECT" ] && body="$(printf '%s' "$body" | python3 -c 'import json,sys;d=json.load(sys.stdin);d["project"]=sys.argv[1];print(json.dumps(d))' "$PROJECT")"
+  if [ -z "$PROJECT" ]; then
+    yml="$(find_deploy_yml)" || die "deploy.yml bulunamadı. Proje klasöründe misiniz? (omk init ... --type <tip> ile oluşur)"
+    dim "tanım: $yml"
+    PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" project "$yml")" || die "deploy.yml okunamadı"
+  fi
 
-  if [ "$DRY_RUN" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_DEPLOY_PATH"; echo "$body"; return 0; fi
+  # Orchestrator'da ayrı bir deploy ucu yok: normalde push + GitHub App tetikler.
+  # Elle tetikleme, projenin init ucuna deploy:true göndermekle yapılır.
+  path="$ORCH_REGISTER_PATH/$(urlencode "$PROJECT")/init"
+  if [ "$DRY_RUN" = "1" ]; then
+    dim "[dry-run] POST $ORCH_API$path"; echo '{"deploy": true}'; return 0
+  fi
 
-  info "Deploy tetikleniyor: $ORCH_API$ORCH_DEPLOY_PATH"
-  resp="$(orch_api POST "$ORCH_DEPLOY_PATH" "$body")" || die "Orchestrator'a ulaşılamadı"
+  info "Deploy tetikleniyor: $PROJECT"
+  resp="$(orch_api POST "$path" '{"deploy": true}')" || die "Orchestrator'a ulaşılamadı"
   code="$(http_code_of "$resp")"; out="$(http_body_of "$resp")"
   case "$code" in
     2??) ;;
-    401|403) die "Yetki reddedildi (HTTP $code) — ORCH_TOKEN geçersiz" ;;
-    404) die "Uç nokta bulunamadı: $ORCH_DEPLOY_PATH (ORCH_DEPLOY_PATH ile değiştirilebilir)" ;;
+    401|403) die "Yetki reddedildi (HTTP $code) — ORCH_TOKEN ya da CF Access servis token'ı geçersiz" ;;
+    404) die "Proje orchestrator'da kayıtlı değil: $PROJECT (önce: omk init $PROJECT --dir . --type <tip>)" ;;
     *) die "Deploy başlatılamadı (HTTP $code): $(printf '%s' "$out" | head -c 300)" ;;
   esac
   id="$(printf '%s' "$out" | python3 "$BOOT_DIR/lib/orch.py" field id 2>/dev/null || true)"
@@ -383,17 +428,37 @@ watch_deploy() {
   id="$1"; n=0; last=""
   info "Durum izleniyor (Ctrl-C ile çıkabilirsiniz)"
   while [ "$n" -lt "${OMK_WAIT_MAX:-120}" ]; do
-    resp="$(orch_api GET "$ORCH_DEPLOY_PATH/$id")" || { warn "durum okunamadı"; return 1; }
+    resp="$(orch_api GET "$ORCH_STATUS_PATH/$id")" || { warn "durum okunamadı"; return 1; }
     case "$(http_code_of "$resp")" in 2??) ;; *) warn "durum okunamadı (HTTP $(http_code_of "$resp"))"; return 1 ;; esac
     st="$(http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" field status 2>/dev/null || true)"
     [ "$st" != "$last" ] && { dim "durum: ${st:-bilinmiyor}"; last="$st"; }
     case "$st" in
       done|success|succeeded|completed|ok) ok "Deploy tamamlandı: $st"; return 0 ;;
-      failed|error|cancelled|canceled)     die "Deploy başarısız: $st" ;;
+      failed|error|cancelled|canceled)
+        warn "Deploy başarısız: $st"
+        show_deploy_log "$id"
+        exit 1 ;;
     esac
     n=$((n+1)); sleep "${OMK_WAIT_INTERVAL:-5}"
   done
-  warn "Zaman aşımı — orchestrator panelinden takip edin"
+  warn "Zaman aşımı — takip için: omk logs $id"
+}
+
+# Deploy logunun son satırlarını gösterir (düz metin döner)
+show_deploy_log() { # id [satir]
+  resp="$(orch_api GET "$ORCH_LOGS_PATH/$1")" || return 0
+  case "$(http_code_of "$resp")" in
+    2??) dim "--- log (son ${2:-30} satır) ---"
+         http_body_of "$resp" | tail -n "${2:-30}" ;;
+    *)   dim "log alınamadı (HTTP $(http_code_of "$resp"))" ;;
+  esac
+}
+
+cmd_logs() {
+  [ $# -ge 1 ] || die "Kullanım: omk logs <deployment-id> [satır]"
+  load_credentials
+  [ -n "${ORCH_API:-}" ] || no_orch_api
+  show_deploy_log "$1" "${2:-200}"
 }
 
 cmd_status() {
@@ -408,9 +473,9 @@ cmd_status() {
     esac
   done
   load_credentials
-  [ -n "${ORCH_API:-}" ] || die "ORCH_API tanımlı değil."
+  [ -n "${ORCH_API:-}" ] || no_orch_api
   if [ "$ALL" != "1" ] && [ -z "$PROJECT" ]; then
-    yml="$(find_deploy_yml)" && PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" body "$yml" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("project",""))')" || PROJECT=""
+    yml="$(find_deploy_yml)" && PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" project "$yml" 2>/dev/null)" || PROJECT=""
   fi
   q="?limit=$LIMIT"
   [ "$ALL" != "1" ] && [ -n "$PROJECT" ] && q="?project=$(urlencode "$PROJECT")&limit=$LIMIT"
@@ -421,6 +486,99 @@ cmd_status() {
     404) die "Uç nokta bulunamadı: $ORCH_DEPLOY_PATH (ORCH_DEPLOY_PATH ile değiştirilebilir)" ;;
     *) die "Liste alınamadı (HTTP $(http_code_of "$resp"))" ;;
   esac
+}
+
+# ---------------------------------------------------------------- token
+# Token'ı sorar, KAYDETMEDEN ÖNCE canlı bir çağrıyla doğrular.
+# Eski akış üç adımdı: credentials'tan satırı sil → omk setup → doctor ile dene.
+cmd_token() {
+  which=task; FORCE=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --task)  which=task; shift ;;
+      --orch)  which=orch; shift ;;
+      --force) FORCE=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "Bilinmeyen opsiyon: $1" ;;
+      *)  die "Fazla argüman: $1" ;;
+    esac
+  done
+  load_credentials
+  mkdir -p "$OMK_CONFIG_DIR"; chmod 700 "$OMK_CONFIG_DIR"
+
+  case "$which" in
+    task) var=TASK_TOKEN; ref=OMK_OP_TASK_TOKEN
+          prompt="Yeni TASK_TOKEN (https://tasks.omerkara.com/login)" ;;
+    orch) var=ORCH_TOKEN; ref=OMK_OP_ORCH_TOKEN
+          prompt="Yeni ORCH_TOKEN" ;;
+  esac
+
+  # Etkileşimsiz kullanım için: OMK_TOKEN_VALUE=... omk token
+  t="$(read_secret OMK_TOKEN_VALUE "$prompt" "$ref")"
+  # Yapıştırırken araya karışan boşluk/satır sonu birebir eşleşmeyi bozuyor
+  t="$(printf '%s' "$t" | tr -d '[:space:]')"
+  [ -n "$t" ] || die "Token boş — değişiklik yapılmadı"
+
+  # Terminale iki kez yapıştırıldığında değer birebir ikiye katlanır. Yankı
+  # kapalı olduğu için fark edilmez ve sunucudaki tam eşleşme sessizce başarısız
+  # olur (yaşanmış vaka: 47 karakterlik token 94 karakter olarak kaydedilmişti).
+  half="$(doubled_half "$t")"
+  [ -n "$half" ] && warn "Değer ikiye katlanmış görünüyor (${#t} karakter); tek kopya da denenecek"
+
+  info "Doğrulanıyor…"
+  code="$(verify_token "$which" "$t")" || die "$code"
+  if [ "$code" != "2" ] && [ -n "$half" ]; then
+    half_code="$(verify_token "$which" "$half")" || true
+    if [ "$half_code" = "2" ]; then
+      ok "Tek kopya doğrulandı — ikiye katlanmış değer yerine o kaydedilecek"
+      t="$half"; code=2
+    fi
+  fi
+  [ "$code" = "2" ] && code=200
+
+  case "$code" in
+    2??)     ok "Token doğrulandı (HTTP $code)" ;;
+    401|403) token_reject "$code" "Sunucu token'ı reddetti — doğru değeri kopyaladığınızdan emin olun" ;;
+    000)     token_reject "$code" "Sunucuya ulaşılamadı: $target" ;;
+    *)       token_reject "$code" "Beklenmeyen yanıt: $target" ;;
+  esac
+
+  run set_kv "$OMK_CRED_FILE" "$var" "$t"
+  ok "$var kaydedildi: $OMK_CRED_FILE"
+  dim "Açık terminaller eski değeri taşıyor. Yenilemek için:"
+  dim "set -a; . \"$OMK_CRED_FILE\"; set +a"
+}
+
+# Değer birebir ikiye katlanmışsa tek kopyayı yazar, değilse boş döner
+doubled_half() {
+  v="$1"; len=${#v}
+  [ "$len" -ge 2 ] && [ $((len % 2)) -eq 0 ] || return 0
+  h=$((len / 2))
+  a="$(printf '%s' "$v" | cut -c"1-$h")"
+  b="$(printf '%s' "$v" | cut -c"$((h + 1))-$len")"
+  [ "$a" = "$b" ] && printf '%s' "$a"
+  return 0
+}
+
+# Token'ı canlı çağrıyla dener. 2xx ise "2", değilse HTTP kodunu yazar.
+verify_token() { # task|orch token
+  case "$1" in
+    task) vt="$TASK_API/tasks?project=$(urlencode "${TASK_PROJECT:-omk-token-check}")"
+          vc="$(http_ping_auth "$vt" "X-Task-Token: $2")" ;;
+    orch) [ -n "${ORCH_API:-}" ] || { printf 'ORCH_API tanımlı değil, doğrulanamaz'; return 1; }
+          vt="$ORCH_API$ORCH_DEPLOY_PATH"
+          vc="$(http_ping_auth "$vt" "Authorization: Bearer $2")" ;;
+  esac
+  target="$vt"
+  case "$vc" in 2??) printf '2' ;; *) printf '%s' "$vc" ;; esac
+  return 0
+}
+
+# Doğrulama başarısız: --force yoksa kaydetmeden çık
+token_reject() { # http_kodu aciklama
+  warn "$2 (HTTP $1)"
+  [ "$FORCE" = "1" ] || die "Token kaydedilmedi. Yine de kaydetmek için: omk token --force"
+  warn "--force verildi, doğrulanmadan kaydediliyor"
 }
 
 # ---------------------------------------------------------------- update
@@ -473,6 +631,16 @@ cmd_doctor() {
     *":$HOME/.local/bin:"*) ok "$HOME/.local/bin PATH'te" ;;
     *) warn "$HOME/.local/bin PATH'te değil (yeni terminal açın ya da omk setup)"; fail=1 ;;
   esac
+  # Eski terminal tuzağı: ortam değişkeni dosyadakini ezer, dolayısıyla
+  # credentials düzeltilse bile açık kabuklar eski değeri taşımaya devam eder.
+  if [ -f "$OMK_CRED_FILE" ] && [ -n "${TASK_TOKEN:-}" ]; then
+    file_tok="$(awk -F"'" '/^TASK_TOKEN=/{print $2}' "$OMK_CRED_FILE" 2>/dev/null || true)"
+    if [ -n "$file_tok" ] && [ "$file_tok" != "$TASK_TOKEN" ]; then
+      warn "Kabuktaki TASK_TOKEN dosyadakinden farklı (${#TASK_TOKEN} / ${#file_tok} karakter)"
+      dim "bu kabuk eski değeri taşıyor → yeni terminal ya da: set -a; . \"$OMK_CRED_FILE\"; set +a"
+      fail=1
+    fi
+  fi
   # Genişlememiş değişken kontrolü: Task API'de '$TASK_PROJECT' adlı proje bu yüzden oluşuyor
   val=""
   for v in TASK_PROJECT TASK_API TASK_TOKEN; do
@@ -483,13 +651,30 @@ cmd_doctor() {
   done
   info "Erişim"
   if [ -n "${TASK_TOKEN:-}" ]; then
-    if task_api GET "/tasks?project=$(urlencode "$project")" >/dev/null 2>&1; then ok "Task API ($TASK_API)"
-    else warn "Task API'ye erişilemedi veya token geçersiz"; fail=1; fi
+    # Tek bir "erişilemedi veya token geçersiz" mesajı yerine HTTP koduna göre ayır
+    url="$TASK_API/tasks?project=$(urlencode "$project")"
+    code="$(http_ping_auth "$url" "X-Task-Token: $TASK_TOKEN")"
+    case "$code" in
+      2??) ok "Task API ($TASK_API)" ;;
+      000) warn "Task API'ye ulaşılamadı: $TASK_API"
+           dim "ağ, DNS ya da yanlış TASK_API — denemek için: curl -i \"$url\""; fail=1 ;;
+      401|403) warn "Task API token'ı reddetti (HTTP $code)"
+           dim "yeni token: https://tasks.omerkara.com/login — sonra ~/.config/omerkara/credentials içindeki TASK_TOKEN satırını silip 'omk setup'"; fail=1 ;;
+      404) warn "Task API uç noktası yok (HTTP 404): $TASK_API/tasks"
+           dim "TASK_API yanlış olabilir; beklenen: https://n8n.omerkara.com/webhook"; fail=1 ;;
+      5??) warn "Task API sunucu hatası (HTTP $code) — n8n workflow'u pasif olabilir"; fail=1 ;;
+      *)   warn "Task API → HTTP $code"; fail=1 ;;
+    esac
   fi
   if [ -n "${ORCH_API:-}" ]; then
     code="$(http_ping "$ORCH_API$ORCH_HEALTH_PATH")"
     case "$code" in
-      2??) ok "Orchestrator ($ORCH_API)" ;;
+      2??) ok "Orchestrator ($ORCH_API)"
+           if [ -z "${CF_ACCESS_CLIENT_ID:-}" ] || [ -z "${CF_ACCESS_CLIENT_SECRET:-}" ]; then
+             warn "CF Access servis token'ı yok — /health dışındaki uçlar 403 döner"
+             dim "omk setup ile CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET girin"
+             fail=1
+           fi ;;
       000) warn "Orchestrator'a ulaşılamadı: $ORCH_API$ORCH_HEALTH_PATH"; fail=1 ;;
       *)   warn "Orchestrator $ORCH_HEALTH_PATH → HTTP $code"; fail=1 ;;
     esac
@@ -506,6 +691,8 @@ case "$cmd" in
   init)   cmd_init "$@" ;;
   deploy) cmd_deploy "$@" ;;
   status) cmd_status "$@" ;;
+  token)  cmd_token "$@" ;;
+  logs)   cmd_logs "$@" ;;
   update) cmd_update "$@" ;;
   doctor) cmd_doctor "$@" ;;
   help|-h|--help) usage ;;

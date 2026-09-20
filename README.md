@@ -17,7 +17,9 @@ Kurulum şunları yapar:
 
 1. Bu repoyu `~/.omerkara/bootstrap` altına klonlar.
 2. Token'ları `~/.config/omerkara/credentials` dosyasına yazar (chmod 600). Sırayla şu kaynaklara bakar: ortam değişkeni, ardından 1Password, ardından kullanıcıya sorar.
-3. `skills.txt` içindeki skill'leri `~/.claude/skills/` altına kurar.
+3. `skills.txt` içindeki skill'leri `~/.claude/skills/` altına kurar. Kayıtlı değilse
+   `ORCH_API` (orchestrator adresi) sorulur; boş geçilebilir, deploy komutları o
+   zaman devre dışı kalır.
 4. Task MCP için kurulum yapmaz — uzak bir sunucudur ve OAuth ile kimlik doğrular.
    Eskiden klonlanmış yerel bir kopya varsa uyarır (silinebilir).
 5. `~/.zshrc` / `~/.bashrc` dosyasına credential yükleyen bir blok ekler; `omk` ve
@@ -45,14 +47,17 @@ omk setup
 omk init visual-configurator --type web --github   # yeni proje
 omk init harf-harbi --type api --dir .              # mevcut klonda (başka makine)
 omk init test-app --dry-run                         # sadece göster
+omk token                                           # TASK_TOKEN'ı yenile (doğrulayıp kaydeder)
+omk token --orch                                    # ORCH_TOKEN'ı yenile
 omk doctor                                          # kontrol
 omk update                                          # bootstrap + skill + mcp güncelle
 
-omk deploy --env staging                            # orchestrator'a deploy
-omk deploy --env production --wait                  # bitene kadar izle
-omk deploy --ref hotfix/1 --dry-run                 # gövdeyi göster, gönderme
+omk deploy                                          # elle deploy tetikle
+omk deploy --wait                                   # bitene kadar izle, hata olursa logu bas
+omk deploy --dry-run                                # isteği göster, gönderme
 omk status                                          # bu projenin son deploy'ları
 omk status --all -n 20                              # tüm projeler
+omk logs <deployment-id>                            # deploy logu
 ```
 
 | `--type` | Runner |
@@ -83,7 +88,13 @@ Komut tekrar çalıştırılabilir; her çalıştırmada eksik olanı tamamlar.
   hiç secret taşımaz, rahatça commit edilir. Kimlik doğrulama OAuth ile yapılır:
   Claude Code içinde ilk kullanımda `/mcp` → *Authenticate*.
 - `.env` gitignore'dadır ve yalnızca secret olmayan proje ayarlarını içerir.
-- Token'ı yenilemek için: `~/.config/omerkara/credentials` içindeki satırı silin, ardından `omk setup` çalıştırın.
+- Token'ı yenilemek için: `omk token`. Yeni değeri sorar, baştaki/sondaki boşlukları
+  kırpar (birebir eşleşme gerektiği için önemli), **kaydetmeden önce** canlı bir
+  çağrıyla doğrular. Doğrulama başarısızsa dosyaya dokunmaz; `--force` ile zorlanır.
+  Etkileşimsiz: `OMK_TOKEN_VALUE=... omk token`.
+- Terminale iki kez yapıştırılan token birebir ikiye katlanır; yankı kapalı olduğu
+  için fark edilmez ve sunucu tarafındaki tam eşleşme sessizce başarısız olur.
+  `omk token` bunu tanır, tek kopyayı da dener ve doğrulanan değeri kaydeder.
 
 ## Yapılandırma
 
@@ -92,9 +103,12 @@ Komut tekrar çalıştırılabilir; her çalıştırmada eksik olanı tamamlar.
 | `TASK_API` | `https://n8n.omerkara.com/webhook` | Task API adresi (HTTP, `X-Task-Token`) |
 | `TASK_MCP_URL` | `https://tasks.omerkara.com/api/mcp` | Task MCP adresi (OAuth) |
 | `ORCH_API` | – | Orchestrator adresi (örn. `https://orchestrator.omerkara.com`) |
-| `ORCH_REGISTER_PATH` | `/projects` | Proje kayıt endpoint'i |
-| `ORCH_DEPLOY_PATH` | `/deployments` | Deploy tetikleme / listeleme endpoint'i |
-| `ORCH_HEALTH_PATH` | `/health` | Sağlık kontrolü endpoint'i |
+| `ORCH_REGISTER_PATH` | `/api/projects` | Proje kaydı ve init ucu |
+| `ORCH_DEPLOY_PATH` | `/api/deployments` | Deployment listesi |
+| `ORCH_STATUS_PATH` | `/api/status` | Tek deployment durumu |
+| `ORCH_LOGS_PATH` | `/api/logs` | Deployment logu |
+| `ORCH_HEALTH_PATH` | `/health` | Sağlık kontrolü |
+| `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` | – | Cloudflare Access servis token'ı |
 | `ORCH_WEBHOOK_URL` / `ORCH_WEBHOOK_SECRET` | – | GitHub webhook ayarları |
 | `OMK_GITHUB_USER` | `omerfkara` | Repo sahibi |
 
@@ -117,44 +131,50 @@ Deploy tanımının tek kaynağı projedeki `deploy.yml`'dir; hem orchestrator k
 orchestrator'da durur, proje repolarında değil.
 
 ```
-omk deploy [proje] [--env <ortam>] [--ref <dal|commit>] [--wait] [--dry-run]
+omk deploy [proje] [--wait] [--dry-run]
 omk status [proje] [-n <adet>] [--all]
+omk logs <deployment-id> [satır]
 ```
 
-`--env` verildiğinde referans `deploy.yml`'deki o ortamın `branch` değerinden alınır;
-`--ref` her zaman onu ezer. `--wait`, deployment `done/success` ya da `failed/error`
-olana kadar durumu yoklar (`OMK_WAIT_INTERVAL`, `OMK_WAIT_MAX` ile ayarlanır).
+`--wait`, deployment `done` ya da `failed` olana kadar durumu yoklar
+(`OMK_WAIT_INTERVAL`, `OMK_WAIT_MAX` ile ayarlanır) ve başarısızlıkta logun son
+satırlarını basar.
 
-### Beklenen API
+### API
 
-Uç nokta yolları ortam değişkeniyle değiştirilebilir; orchestrator farklı bir şema
-kullanıyorsa kod değil yalnızca bu değerler değişir. Yetkilendirme her istekte
-`Authorization: Bearer $ORCH_TOKEN`.
+Kaynak: `https://orchestrator.omerkara.com/orchestrator.md`
+
+Kimlik doğrulama — `/health` dışındaki **her** uç üç başlık ister:
 
 ```
-POST $ORCH_API$ORCH_REGISTER_PATH        # varsayılan /projects
-{ "project": "...", "repo": "omerfkara/...", "type": "web", "runner": "ubuntu", "ref": "main" }
-→ 2xx oluşturuldu · 409 zaten var
-
-POST $ORCH_API$ORCH_DEPLOY_PATH          # varsayılan /deployments
-{ "project": "...", "ref": "main", "environment": "production", "trigger": "cli", ... }
-→ 2xx { "id": "...", "status": "queued" }
-
-GET  $ORCH_API$ORCH_DEPLOY_PATH/<id>     # --wait bunu yoklar
-→ 2xx { "id": "...", "status": "running|done|failed" }
-
-GET  $ORCH_API$ORCH_DEPLOY_PATH?project=<ad>&limit=<n>
-→ 2xx [ { project, server, status, trigger, timestamp }, ... ]
-
-GET  $ORCH_API$ORCH_HEALTH_PATH          # varsayılan /health, omk doctor kullanır
-→ 2xx
+Authorization: Bearer $ORCH_TOKEN
+CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID
+CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET
 ```
 
-Yanıt biçimi esnektir: düz liste, `{"deployments": [...]}`, `{"data": [...]}` ya da
-n8n'in `[{"json": {...}}]` biçimi kabul edilir. Alan adları da esnektir —
-`server`/`runner`/`target`, `status`/`state`, `created_at`/`timestamp` gibi karşılıklar
-`lib/orch.py` içindeki `FIELDS` tablosunda tutulur; yeni bir ad çıkarsa oraya bir satır
-eklemek yeter.
+Cloudflare Access servis token'ı eksikse yanıt 403 olur; `omk doctor` ayrıca uyarır.
+
+```
+POST $ORCH_API/api/projects              # proje kaydı (deploy.yml'den üretilir)
+{ "name": "...", "git_url": "...", "target_runner": "macos|ubuntu|pi",
+  "build_command": "...", "deploy_command": "...", "watch_paths": [...] }
+→ göndermediğiniz alanlar orchestrator tarafında korunur
+
+POST $ORCH_API/api/projects/<ad>/init    # elle deploy tetikleme
+{ "deploy": true }  → 202 { "deployment_id": <id> }
+
+GET  $ORCH_API/api/deployments?project=<ad>&limit=<n>
+GET  $ORCH_API/api/status/<id>           # done | failed | pending
+GET  $ORCH_API/api/logs/<id>             # düz metin
+GET  $ORCH_API/health
+```
+
+Deploy normalde **main dalına push** ile tetiklenir: orchestrator'ın GitHub App'i
+hesabın tüm push olaylarını yakalar, ayrıca webhook kaydı gerekmez. `omk deploy`
+bunu elle tetiklemek içindir.
+
+Alan adları esnek okunur (`server`/`runner`/`target`, `status`/`state`,
+`deployment_id`/`id` …); eşleşmeler `lib/orch.py` içindeki `FIELDS` tablosunda.
 
 ## Gereksinimler
 
