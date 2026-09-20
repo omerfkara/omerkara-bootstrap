@@ -50,6 +50,7 @@ omk init test-app --dry-run                         # sadece göster
 omk token                                           # TASK_TOKEN'ı yenile (doğrulayıp kaydeder)
 omk token --orch                                    # ORCH_TOKEN'ı yenile
 omk doctor                                          # kontrol
+omk doctor --fix                                    # bozuk config'i onarır
 omk update                                          # bootstrap + skill + mcp güncelle
 
 omk deploy                                          # elle deploy tetikle

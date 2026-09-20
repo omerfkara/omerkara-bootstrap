@@ -35,7 +35,7 @@ Komutlar:
   omk status [proje]        Son deployment'ları listeler
   omk logs <id> [satır]     Bir deployment'ın logunu gösterir
   omk token [--task|--orch] Token'ı yeniler: sorar, doğrular, sonra kaydeder
-  omk doctor [proje]        Bağımlılık, token ve API erişimini kontrol eder
+  omk doctor [--fix] [proje]  Config ve erişimi kontrol eder; --fix onarır
   omk help
 
 init opsiyonları:
@@ -359,7 +359,7 @@ register_orchestrator() {
   case "$(http_code_of "$resp")" in
     2??) ok "Orchestrator'a kaydedildi" ;;
     409) dim "Orchestrator'da zaten kayıtlı" ;;
-    401|403) warn "Orchestrator kaydı reddedildi — ORCH_TOKEN ya da CF Access token'ı geçersiz" ;;
+    401|403|30?) orch_explain "$(http_code_of "$resp")" ;;
     422) warn "Orchestrator kaydı doğrulamadan geçmedi:"
          http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" errors
          dim "deploy.yml'i düzeltip tekrar: omk init $PROJECT --dir ." ;;
@@ -409,7 +409,7 @@ project_registered() { # proje
   case "$(http_code_of "$resp")" in
     2??) ;;
     401|403) die "Yetki reddedildi — ORCH_TOKEN ya da CF Access servis token'ı geçersiz" ;;
-    *) die "Proje listesi okunamadı (HTTP $(http_code_of "$resp"))" ;;
+    *) orch_explain "$(http_code_of "$resp")"; exit 1 ;;
   esac
   http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" has-project "$1" >/dev/null 2>&1
 }
@@ -501,7 +501,7 @@ cmd_deploy() {
   done
   export DRY_RUN="${DRY_RUN:-0}"
   load_credentials
-  [ -n "${ORCH_API:-}" ] || no_orch_api
+  orch_preflight
 
   yml=""
   if [ -z "$PROJECT" ]; then
@@ -544,7 +544,7 @@ cmd_deploy() {
   code="$(http_code_of "$resp")"; out="$(http_body_of "$resp")"
   case "$code" in
     2??) ;;
-    401|403) die "Yetki reddedildi (HTTP $code) — ORCH_TOKEN ya da CF Access servis token'ı geçersiz" ;;
+    401|403|30?) orch_explain "$code"; exit 1 ;;
     404) die "Proje az önce kaydedildi ama servis henüz görmüyor — birkaç dakika sonra: omk deploy" ;;
     422) die "Orchestrator init'i reddetti (422): $(printf '%s' "$out" | head -c 300)
 deploy.yml'de repo_path dolu mu? (runner üzerindeki checkout dizini)" ;;
@@ -590,7 +590,7 @@ show_deploy_log() { # id [satir]
 cmd_logs() {
   [ $# -ge 1 ] || die "Kullanım: omk logs <deployment-id> [satır]"
   load_credentials
-  [ -n "${ORCH_API:-}" ] || no_orch_api
+  orch_preflight
   show_deploy_log "$1" "${2:-200}"
 }
 
@@ -606,7 +606,7 @@ cmd_status() {
     esac
   done
   load_credentials
-  [ -n "${ORCH_API:-}" ] || no_orch_api
+  orch_preflight
   if [ "$ALL" != "1" ] && [ -z "$PROJECT" ]; then
     yml="$(find_deploy_yml)" && PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" project "$yml" 2>/dev/null)" || PROJECT=""
   fi
@@ -730,9 +730,71 @@ cmd_update() {
 }
 
 # ---------------------------------------------------------------- doctor
+# --fix: bulunan config hatalarını onarır. Sadece kesin teşhis edilebilen ve
+# geri alınabilir şeyleri düzeltir; belirsizse dokunmaz, ne yapılacağını söyler.
+# Ortamdaki değer doğru olsa bile DOSYADAKİ bozuksa onarılmalı: ortam
+# geçicidir, config kalıcı. Aksi halde hata yeni terminalde geri gelir.
+doctor_fix_orch_api() {
+  cfg_orch="$(awk -F"'" '/^ORCH_API=/{print $2}' "$OMK_CONF_FILE" 2>/dev/null || true)"
+  [ -n "$cfg_orch" ] || return 0
+  is_url "$cfg_orch" && return 0
+  warn "config dosyasındaki ORCH_API bir adres değil (muhtemelen token yapıştırılmış)"
+  dim "$OMK_CONF_FILE"
+  a="$(ask_plain "Doğru ORCH_API (ör. https://orchestrator.omerkara.com)")"
+  if [ -z "$a" ]; then dim "atlandı"; return 1; fi
+  if ! is_url "$a"; then warn "Bu da adres değil, dokunulmadı"; return 1; fi
+  run set_kv "$OMK_CONF_FILE" ORCH_API "$a"; export ORCH_API="$a"
+  ok "ORCH_API düzeltildi: $a"
+}
+
+doctor_fix_cf_access() {
+  [ -n "${ORCH_API:-}" ] || return 0
+  # Ortamdan geçici olarak verilmiş olabilir; kalıcı olan credentials dosyası
+  has_kv "$OMK_CRED_FILE" CF_ACCESS_CLIENT_ID \
+    && has_kv "$OMK_CRED_FILE" CF_ACCESS_CLIENT_SECRET && return 0
+  warn "Cloudflare Access servis token'ı eksik — orchestrator istekleri 302/403 döner"
+  ensure_token CF_ACCESS_CLIENT_ID "CF_ACCESS_CLIENT_ID" OMK_OP_CF_ID no
+  ensure_token CF_ACCESS_CLIENT_SECRET "CF_ACCESS_CLIENT_SECRET" OMK_OP_CF_SECRET no
+}
+
+# Terminale iki kez yapıştırılmış token'ı tanıyıp tek kopyayı doğrulayarak kaydeder
+doctor_fix_doubled_task_token() {
+  cfg_tok="$(awk -F"'" '/^TASK_TOKEN=/{print $2}' "$OMK_CRED_FILE" 2>/dev/null || true)"
+  [ -n "$cfg_tok" ] || return 0
+  TASK_TOKEN="$cfg_tok"
+  half="$(doubled_half "$TASK_TOKEN")"
+  [ -n "$half" ] || return 0
+  warn "TASK_TOKEN ikiye katlanmış görünüyor (${#TASK_TOKEN} karakter)"
+  if [ "$(verify_token task "$TASK_TOKEN")" = "2" ]; then
+    dim "yine de çalışıyor, dokunulmadı"; return 0
+  fi
+  if [ "$(verify_token task "$half")" = "2" ]; then
+    run set_kv "$OMK_CRED_FILE" TASK_TOKEN "$half"; export TASK_TOKEN="$half"
+    ok "Tek kopya doğrulandı ve kaydedildi (${#half} karakter)"
+  else
+    warn "Tek kopya da geçerli değil — omk token ile yenileyin"
+  fi
+}
+
 cmd_doctor() {
+  FIX=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --fix) FIX=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      -*) die "Bilinmeyen opsiyon: $1" ;;
+      *) break ;;
+    esac
+  done
   project="${1:-$(basename "$PWD")}"
   load_credentials
+  if [ "$FIX" = "1" ]; then
+    info "Onarım"
+    doctor_fix_orch_api || true
+    doctor_fix_cf_access || true
+    doctor_fix_doubled_task_token || true
+    load_credentials
+  fi
   fail=0
   info "Bağımlılıklar"
   for c in git curl python3 perl claude gh uv op; do
@@ -818,7 +880,12 @@ cmd_doctor() {
   else
     dim "ORCH_API tanımlı değil — deploy komutları devre dışı"
   fi
-  [ "$fail" = "0" ] && ok "Her şey yolunda" || die "Sorunlar var (yukarıya bakın)"
+  if [ "$fail" = "0" ]; then
+    ok "Her şey yolunda"
+  else
+    [ "$FIX" = "1" ] || dim "onarılabilir olanları düzeltmek için: omk doctor --fix"
+    die "Sorunlar var (yukarıya bakın)"
+  fi
 }
 
 # ---------------------------------------------------------------- main

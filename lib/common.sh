@@ -190,6 +190,45 @@ http_ping_auth() { # url header [timeout]
   printf '%s' "$code"
 }
 
+# Orchestrator yanıtını SEBEBE çevirir. Her çağrı yerinde ayrı ayrı yorumlamak
+# yerine tek yer: kod eklendiğinde mesaj her komutta tutarlı kalır.
+# Yazdırır, karar vermez — çağıran exit'e kendi karar verir.
+orch_explain() { # http_kodu
+  case "$1" in
+    000) warn "Orchestrator'a ulaşılamadı: $ORCH_API"
+         dim "adres yanlış olabilir ya da ağ/VPN engelliyor  →  omk doctor" ;;
+    30?) warn "Cloudflare Access giriş sayfasına yönlendirdi (HTTP $1)"
+         dim "servis token'ı eksik ya da yanlış  →  omk setup  (CF_ACCESS_CLIENT_ID / SECRET)" ;;
+    401) warn "Bearer token reddedildi (401)"
+         dim "→ omk token --orch" ;;
+    403) warn "Cloudflare Access reddetti (403)"
+         dim "servis token'ı yanlış ya da bu servise yetkili değil  →  omk setup" ;;
+    5??) warn "Orchestrator sunucu hatası (HTTP $1)"
+         dim "servis ayakta mı? Pi üzerinde: docker ps" ;;
+    *)   warn "Beklenmeyen yanıt (HTTP $1)" ;;
+  esac
+}
+
+# Orchestrator'a istek GÖNDERMEDEN ÖNCE config tutarlı mı? Tutarsızlık varsa
+# ağa çıkıp anlamsız bir hata almak yerine ne yapılacağını söyler.
+orch_preflight() {
+  [ -n "${ORCH_API:-}" ] || no_orch_api
+  if ! is_url "$ORCH_API"; then
+    warn "ORCH_API bir adres değil: $ORCH_API"
+    dim "yanlışlıkla token yazılmış olabilir  →  omk doctor --fix"
+    exit 1
+  fi
+  if [ -z "${ORCH_TOKEN:-}" ]; then
+    warn "ORCH_TOKEN yok"; dim "→ omk token --orch"; exit 1
+  fi
+  if [ -z "${CF_ACCESS_CLIENT_ID:-}" ] || [ -z "${CF_ACCESS_CLIENT_SECRET:-}" ]; then
+    warn "Cloudflare Access servis token'ı yok"
+    dim "orchestrator CF Access arkasında; token'sız istekler giriş sayfasına yönlenir (302)"
+    dim "→ omk setup"
+    exit 1
+  fi
+}
+
 # Orchestrator API çağrısı: method path [json_body]
 # Gövdeyi stdout'a, HTTP kodunu son satıra yazar.
 orch_api() {
