@@ -6,7 +6,11 @@ name: {{PROJECT}}
 git_url: https://github.com/{{GITHUB_REPO}}.git
 target_runner: {{DEPLOY_RUNNER}}        # macos | ubuntu | pi
 
-# Runner üzerinde çalışacak komutlar
+# ZORUNLU — runner üzerinde çalışacak komutlar. Boş bırakılırsa orchestrator
+# kaydı yapılmaz (yeni kayıtta her ikisi de zorunlu).
+#   flutter : "flutter build ipa --release"  /  "bundle exec fastlane beta"
+#   web     : "npm ci && npm run build"      /  "rsync -a dist/ /var/www/{{PROJECT}}/"
+#   api     : "docker build -t {{PROJECT}} ." /  "docker compose up -d"
 build_command: ""
 deploy_command: ""
 

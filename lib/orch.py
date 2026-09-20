@@ -122,9 +122,14 @@ def cmd_register(argv):
     elif isinstance(wp, list) and wp:
         body["watch_paths"] = wp
 
-    missing = [k for k in ("name", "git_url", "target_runner") if not body.get(k)]
+    # Yeni kayıtta orchestrator bunların hepsini zorunlu tutuyor; güncellemede
+    # göndermediğin alan korunuyor ama boş göndermek üzerine yazar. Bu yüzden
+    # boş bırakmak yerine kullanıcıdan doldurmasını istiyoruz.
+    required = ("name", "git_url", "target_runner", "build_command", "deploy_command")
+    missing = [k for k in required if not body.get(k)]
     if missing:
-        print("! deploy.yml eksik alan: " + ", ".join(missing), file=sys.stderr)
+        print("! deploy.yml içinde doldurulmamış alan: " + ", ".join(missing),
+              file=sys.stderr)
         sys.exit(1)
     print(json.dumps(body))
 
@@ -137,6 +142,36 @@ def cmd_project(argv):
         print("! deploy.yml içinde 'name' yok", file=sys.stderr)
         sys.exit(1)
     print(name)
+
+
+def cmd_get(argv):
+    """deploy.yml'den tek bir alanı yazar: orch.py get <anahtar> <dosya>"""
+    spec = parse_yaml(argv[1])
+    val = spec.get(argv[0])
+    if isinstance(val, str) and val.strip():
+        print(val.strip())
+
+
+def cmd_errors(argv):
+    """FastAPI 422 gövdesini okunur satırlara çevirir."""
+    raw = sys.stdin.read().strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        print("  " + raw[:300])
+        return
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if isinstance(detail, str):
+        print("  " + detail)
+        return
+    if not isinstance(detail, list):
+        print("  " + json.dumps(data)[:300])
+        return
+    for item in detail:
+        if not isinstance(item, dict):
+            continue
+        loc = [str(x) for x in item.get("loc", []) if x != "body"]
+        print(f"  {'.'.join(loc) or '?'}: {item.get('msg', '')}")
 
 
 def cmd_table(argv):
@@ -167,6 +202,7 @@ def main():
         sys.exit(2)
     mode, argv = sys.argv[1], sys.argv[2:]
     handlers = {"register": cmd_register, "project": cmd_project,
+                "errors": cmd_errors, "get": cmd_get,
                 "table": cmd_table, "field": cmd_field}
     if mode not in handlers:
         print(f"bilinmeyen mod: {mode}", file=sys.stderr)

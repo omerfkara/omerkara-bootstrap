@@ -186,11 +186,11 @@ install_cli_link() {
 
 # ---------------------------------------------------------------- init
 cmd_init() {
-  PROJECT=""; DIR=""; PTYPE="other"; GITHUB=0; REMOTE=1; FORCE=0
+  PROJECT=""; DIR=""; PTYPE="other"; PTYPE_GIVEN=0; GITHUB=0; REMOTE=1; FORCE=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --dir) need_val --dir $#; DIR="$2"; shift 2 ;;
-      --type) need_val --type $#; PTYPE="$2"; shift 2 ;;
+      --type) need_val --type $#; PTYPE="$2"; PTYPE_GIVEN=1; shift 2 ;;
       --github) GITHUB=1; shift ;;
       --no-remote) REMOTE=0; shift ;;
       --force) FORCE=1; shift ;;
@@ -212,6 +212,18 @@ cmd_init() {
     other)               DEPLOY_RUNNER=none ;;
     *) die "Geçersiz --type: $PTYPE" ;;
   esac
+
+  # --type verilmediyse ama projede deploy.yml varsa runner'ı oradan al:
+  # aksi halde tekrar çalıştırma tipi 'other'a düşürüp kaydı sessizce atlıyordu
+  if [ "$PTYPE_GIVEN" = "0" ]; then
+    _d="${DIR:-$PWD/$PROJECT}"
+    if [ -f "$_d/deploy.yml" ]; then
+      _r="$(python3 "$BOOT_DIR/lib/orch.py" get target_runner "$_d/deploy.yml" 2>/dev/null || true)"
+      if [ -n "$_r" ] && [ "$_r" != "none" ]; then
+        DEPLOY_RUNNER="$_r"; dim "runner deploy.yml'den alındı: $_r"
+      fi
+    fi
+  fi
 
   require_cmds git curl python3 perl
   load_credentials
@@ -332,16 +344,23 @@ register_orchestrator() {
   fi
   # Kayıt gövdesi deploy.yml'den üretilir: tek bir tanım kaynağı olsun
   [ -f deploy.yml ] || { dim "deploy.yml yok, orchestrator kaydı atlandı"; return 0; }
-  body="$(python3 "$BOOT_DIR/lib/orch.py" register deploy.yml)" || {
-    warn "deploy.yml eksik — orchestrator kaydı atlandı"; return 0
-  }
+  if ! body="$(python3 "$BOOT_DIR/lib/orch.py" register deploy.yml 2>&1)"; then
+    warn "Orchestrator kaydı atlandı"
+    dim "$body"
+    dim "deploy.yml'i doldurup tekrar çalıştırın: omk init $PROJECT --dir ."
+    return 0
+  fi
   if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_REGISTER_PATH  $body"; return 0; fi
   resp="$(orch_api POST "$ORCH_REGISTER_PATH" "$body")" || { warn "Orchestrator kaydı yapılamadı"; return 0; }
   case "$(http_code_of "$resp")" in
     2??) ok "Orchestrator'a kaydedildi" ;;
     409) dim "Orchestrator'da zaten kayıtlı" ;;
-    401|403) warn "Orchestrator kaydı reddedildi — ORCH_TOKEN geçersiz" ;;
-    *)   warn "Orchestrator kaydı başarısız (HTTP $(http_code_of "$resp")): $(http_body_of "$resp" | head -c 200)" ;;
+    401|403) warn "Orchestrator kaydı reddedildi — ORCH_TOKEN ya da CF Access token'ı geçersiz" ;;
+    422) warn "Orchestrator kaydı doğrulamadan geçmedi:"
+         http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" errors
+         dim "deploy.yml'i düzeltip tekrar: omk init $PROJECT --dir ." ;;
+    *)   warn "Orchestrator kaydı başarısız (HTTP $(http_code_of "$resp")):"
+         dim "$(http_body_of "$resp" | head -c 300)" ;;
   esac
 }
 

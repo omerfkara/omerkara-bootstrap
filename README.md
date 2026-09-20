@@ -158,7 +158,9 @@ Cloudflare Access servis token'ı eksikse yanıt 403 olur; `omk doctor` ayrıca 
 POST $ORCH_API/api/projects              # proje kaydı (deploy.yml'den üretilir)
 { "name": "...", "git_url": "...", "target_runner": "macos|ubuntu|pi",
   "build_command": "...", "deploy_command": "...", "watch_paths": [...] }
-→ göndermediğiniz alanlar orchestrator tarafında korunur
+→ yeni kayıtta beş alan da zorunlu; güncellemede göndermediğiniz alan korunur.
+  Bu yüzden boş komutlar gövdeye konmaz, onun yerine deploy.yml'i doldurmanız
+  istenir. 422 yanıtı alan adlarıyla birlikte okunur biçimde gösterilir.
 
 POST $ORCH_API/api/projects/<ad>/init    # elle deploy tetikleme
 { "deploy": true }  → 202 { "deployment_id": <id> }
