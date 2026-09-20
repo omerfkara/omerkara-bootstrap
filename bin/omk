@@ -50,6 +50,8 @@ deploy opsiyonları:
   --wait                    Bitene kadar durumu izle, hata halinde logu göster
   --env <dosya>             Dosyadaki değişkenleri vault'a yazar, yayılmasını bekler
   --dry-run                 İsteği göster, gönderme
+  --ios-bootstrap           match'i TEK SEFERLİK yazma modunda çalıştırır
+                            (yeni bir bundle id'ye profil üretir; yalnızca macos)
   (deploy normalde main'e push ile tetiklenir; bu komut elle tetikler)
   (proje orchestrator'da kayıtlı değilse deploy.yml'den kaydeder ve bekler)
 
@@ -458,12 +460,13 @@ find_deploy_yml() {
 }
 
 cmd_deploy() {
-  WAIT=0; PROJECT=""; ENV_FILE=""
+  WAIT=0; PROJECT=""; ENV_FILE=""; IOS_BOOTSTRAP=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --wait)    WAIT=1; shift ;;
       --env)     ENV_FILE="${2:-}"; [ -n "$ENV_FILE" ] || die "--env için dosya adı gerekli"; shift 2 ;;
       --dry-run) DRY_RUN=1; shift ;;
+      --ios-bootstrap) IOS_BOOTSTRAP=1; shift ;;
       -h|--help) usage; return 0 ;;
       -*) die "Bilinmeyen opsiyon: $1" ;;
       *) [ -z "$PROJECT" ] && PROJECT="$1" || die "Fazla argüman: $1"; shift ;;
@@ -486,9 +489,14 @@ cmd_deploy() {
   # Orchestrator'da ayrı bir deploy ucu yok: normalde push + GitHub App tetikler.
   # Elle tetikleme, projenin init ucuna deploy:true göndermekle yapılır.
   path="$ORCH_REGISTER_PATH/$(urlencode "$PROJECT")/init"
+  if [ "$IOS_BOOTSTRAP" = "1" ]; then
+    body='{"deploy": true, "ios_bootstrap": true}'
+  else
+    body='{"deploy": true}'
+  fi
   if [ "$DRY_RUN" = "1" ]; then
     [ -n "$ENV_FILE" ] && dim "[dry-run] POST $ORCH_API/api/env/$(urlencode "$PROJECT")"
-    dim "[dry-run] POST $ORCH_API$path"; echo '{"deploy": true}'; return 0
+    dim "[dry-run] POST $ORCH_API$path"; echo "$body"; return 0
   fi
 
   # 1) Kayıt: env yazmak da init de kayıtlı proje ister (ikisi de 404 döner),
@@ -504,7 +512,8 @@ cmd_deploy() {
   [ -n "$ENV_FILE" ] && push_env_file "$PROJECT" "$ENV_FILE"
 
   info "Deploy tetikleniyor: $PROJECT"
-  resp="$(orch_api POST "$path" '{"deploy": true}')" || die "Orchestrator'a ulaşılamadı"
+  [ "$IOS_BOOTSTRAP" = "1" ] && warn "ios_bootstrap açık — match yazma modunda, Apple hesabında sertifika/profil üretebilir"
+  resp="$(orch_api POST "$path" "$body")" || die "Orchestrator'a ulaşılamadı"
   code="$(http_code_of "$resp")"; out="$(http_body_of "$resp")"
   case "$code" in
     2??) ;;
