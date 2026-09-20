@@ -100,15 +100,15 @@ def parse_yaml(path):
 def cmd_register(argv):
     """deploy.yml → POST /api/projects gövdesi.
 
-    Orchestrator'ın beklediği alanlar: name, git_url, target_runner,
-    build_command, deploy_command (+ watch_paths, environment, notifications).
+    Zorunlu: name, git_url (HTTPS), target_runner, build_command, deploy_command.
+    Opsiyonel: watch_paths, ios_secrets_dir, env_file, notifications.
     Göndermediğimiz alanlar orchestrator tarafında korunuyor, bu yüzden boş
     değerler gövdeye hiç konmaz.
     """
     spec = parse_yaml(argv[0])
     body = {}
     for key in ("name", "git_url", "target_runner", "build_command",
-                "deploy_command", "environment", "notifications"):
+                "deploy_command", "ios_secrets_dir", "env_file", "notifications"):
         val = spec.get(key)
         if isinstance(val, str) and val.strip():
             body[key] = val.strip()
@@ -129,6 +129,18 @@ def cmd_register(argv):
     missing = [k for k in required if not body.get(k)]
     if missing:
         print("! deploy.yml içinde doldurulmamış alan: " + ", ".join(missing),
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Orchestrator git_url'i HTTPS bekliyor; SSH biçimi sessizce başarısız olur
+    if not body["git_url"].startswith("https://"):
+        print("! git_url HTTPS olmalı (https://github.com/<kullanıcı>/<repo>.git): "
+              + body["git_url"], file=sys.stderr)
+        sys.exit(1)
+
+    runners = ("pi", "ubuntu", "macos")
+    if body["target_runner"] not in runners:
+        print("! target_runner şunlardan biri olmalı: " + ", ".join(runners),
               file=sys.stderr)
         sys.exit(1)
     print(json.dumps(body))

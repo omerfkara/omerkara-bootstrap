@@ -3,20 +3,31 @@
 # Not: yalnızca 'anahtar: değer' kullanın; PyYAML'ı olmayan makinelerde (Pi)
 # yedek ayrıştırıcı liste sözdizimini desteklemez — watch_paths virgülle ayrılır.
 name: {{PROJECT}}
-git_url: https://github.com/{{GITHUB_REPO}}.git
-target_runner: {{DEPLOY_RUNNER}}        # macos | ubuntu | pi
+git_url: https://github.com/{{GITHUB_REPO}}.git    # HTTPS olmalı, SSH biçimi kabul edilmez
+target_runner: {{DEPLOY_RUNNER}}        # pi | ubuntu | macos
 
-# ZORUNLU — runner üzerinde çalışacak komutlar. Boş bırakılırsa orchestrator
-# kaydı yapılmaz (yeni kayıtta her ikisi de zorunlu).
-#   flutter : "flutter build ipa --release"  /  "bundle exec fastlane beta"
-#   web     : "npm ci && npm run build"      /  "rsync -a dist/ /var/www/{{PROJECT}}/"
-#   api     : "docker build -t {{PROJECT}} ." /  "docker compose up -d"
+# ZORUNLU — runner üzerinde çalışacak komutlar. Boşsa orchestrator kaydı yapılmaz.
+# build_command genelde kodu güncellemekle başlar:
+#   "cd ~/apps/{{PROJECT}} && git pull"
+# deploy_command yeniden başlatma mantığıdır (systemctl, docker compose, fastlane).
+#
+# macOS / iOS için deploy_command'da PATH ve locale açıkça verilmeli; fastlane
+# CI'da login keychain kilitli olduğu için geçici keychain kullanmalı
+# (setup_ci_keychain / teardown_ci_keychain lane'leri):
+#   "export PATH=/opt/homebrew/opt/ruby/bin:/opt/homebrew/bin:$PATH &&
+#    LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 CI=true bundle exec fastlane beta"
 build_command: ""
 deploy_command: ""
 
 # Değişiklik bu yolların dışındaysa push deploy tetiklemez (boş = her değişiklik)
 watch_paths: ""
 
+# macOS/iOS projeleri için Apple kimlik bilgilerinin runner'daki klasörü
+ios_secrets_dir: ""
+
+# Runner üzerindeki .env dosyasının yolu (içerik: omk değil, /api/env ucu yazar)
+env_file: ""
+
 # Deploy, main dalına push ile otomatik tetiklenir (orchestrator'ın GitHub App'i).
-# Elle tetikleme: omk deploy
-# Sertifika, SSH anahtarı ve store credential'ları orchestrator'da tutulur.
+# Elle tetikleme: omk deploy   —   kayıttan sonra config'in runner'lara yayılması
+# 3-8 dakika sürebilir, ilk deploy'u ona göre zamanlayın.

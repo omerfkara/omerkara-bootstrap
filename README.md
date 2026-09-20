@@ -156,11 +156,24 @@ Cloudflare Access servis token'ı eksikse yanıt 403 olur; `omk doctor` ayrıca 
 
 ```
 POST $ORCH_API/api/projects              # proje kaydı (deploy.yml'den üretilir)
-{ "name": "...", "git_url": "...", "target_runner": "macos|ubuntu|pi",
-  "build_command": "...", "deploy_command": "...", "watch_paths": [...] }
-→ yeni kayıtta beş alan da zorunlu; güncellemede göndermediğiniz alan korunur.
-  Bu yüzden boş komutlar gövdeye konmaz, onun yerine deploy.yml'i doldurmanız
-  istenir. 422 yanıtı alan adlarıyla birlikte okunur biçimde gösterilir.
+{ "name": "...", "git_url": "https://...git", "target_runner": "pi|ubuntu|macos",
+  "build_command": "...", "deploy_command": "...",
+  "watch_paths": [...], "ios_secrets_dir": "...", "env_file": "..." }
+→ ilk beşi zorunlu; güncellemede göndermediğiniz alan korunur. Bu yüzden boş
+  komutlar gövdeye konmaz, onun yerine deploy.yml'i doldurmanız istenir.
+  git_url HTTPS olmalı ve target_runner üçlüden biri olmalı — ikisi de
+  gönderilmeden önce kontrol edilir. 422 yanıtı alan adlarıyla gösterilir.
+
+Kayıttan sonra config'in runner'lara yayılması **3-8 dakika** sürer; ilk deploy'u
+ona göre zamanlayın (`omk deploy` 404 alırsa sebebi genelde budur).
+
+macOS/iOS için `deploy_command` PATH ve locale'i açıkça vermeli, fastlane de
+geçici keychain kullanmalı — login keychain etkileşimsiz SSH oturumunda kilitli:
+
+```
+export PATH=/opt/homebrew/opt/ruby/bin:/opt/homebrew/bin:$PATH && \
+LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 CI=true bundle exec fastlane beta
+```
 
 POST $ORCH_API/api/projects/<ad>/init    # elle deploy tetikleme
 { "deploy": true }  → 202 { "deployment_id": <id> }

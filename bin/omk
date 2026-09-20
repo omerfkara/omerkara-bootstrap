@@ -353,7 +353,8 @@ register_orchestrator() {
   if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_REGISTER_PATH  $body"; return 0; fi
   resp="$(orch_api POST "$ORCH_REGISTER_PATH" "$body")" || { warn "Orchestrator kaydı yapılamadı"; return 0; }
   case "$(http_code_of "$resp")" in
-    2??) ok "Orchestrator'a kaydedildi" ;;
+    2??) ok "Orchestrator'a kaydedildi"
+         dim "config runner'lara yayılana kadar 3-8 dakika sürebilir; ilk 'omk deploy' bundan sonra" ;;
     409) dim "Orchestrator'da zaten kayıtlı" ;;
     401|403) warn "Orchestrator kaydı reddedildi — ORCH_TOKEN ya da CF Access token'ı geçersiz" ;;
     422) warn "Orchestrator kaydı doğrulamadan geçmedi:"
@@ -441,7 +442,10 @@ cmd_deploy() {
   case "$code" in
     2??) ;;
     401|403) die "Yetki reddedildi (HTTP $code) — ORCH_TOKEN ya da CF Access servis token'ı geçersiz" ;;
-    404) die "Proje orchestrator'da kayıtlı değil: $PROJECT (önce: omk init $PROJECT --dir . --type <tip>)" ;;
+    404) warn "Proje orchestrator'da bulunamadı: $PROJECT"
+         dim "yeni kaydettiyseniz config'in yayılması 3-8 dakika sürebilir, biraz sonra tekrar deneyin"
+         dim "hiç kaydedilmediyse: omk init $PROJECT --dir . --type <tip>"
+         exit 1 ;;
     *) die "Deploy başlatılamadı (HTTP $code): $(printf '%s' "$out" | head -c 300)" ;;
   esac
   id="$(printf '%s' "$out" | python3 "$BOOT_DIR/lib/orch.py" field id 2>/dev/null || true)"
