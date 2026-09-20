@@ -91,16 +91,24 @@ cmd_setup() {
   if has_kv "$OMK_CONF_FILE" ORCH_API; then
     dim "ORCH_API kayıtlı"
   elif [ -n "${ORCH_API:-}" ]; then
-    run set_kv "$OMK_CONF_FILE" ORCH_API "$ORCH_API"
-    ok "ORCH_API kaydedildi"
-  else
-    a="$(ask_plain "ORCH_API (orchestrator adresi, boş geçilebilir)")"
-    if [ -n "$a" ]; then
-      run set_kv "$OMK_CONF_FILE" ORCH_API "$a"; export ORCH_API="$a"
-      ok "ORCH_API kaydedildi"
+    if is_url "$ORCH_API"; then
+      run set_kv "$OMK_CONF_FILE" ORCH_API "$ORCH_API"; ok "ORCH_API kaydedildi"
     else
-      dim "ORCH_API atlandı — deploy komutları devre dışı kalır"
+      warn "ORCH_API bir adres değil, kaydedilmedi (https://... bekleniyor)"
     fi
+  else
+    # Buraya token yapıştırılması kolay bir hata: adres olmayan değeri alma
+    tries=0
+    while [ "$tries" -lt 3 ]; do
+      a="$(ask_plain "ORCH_API (orchestrator adresi, ör. https://orchestrator.omerkara.com — boş geçilebilir)")"
+      [ -z "$a" ] && { dim "ORCH_API atlandı — deploy komutları devre dışı kalır"; break; }
+      if is_url "$a"; then
+        run set_kv "$OMK_CONF_FILE" ORCH_API "$a"; export ORCH_API="$a"
+        ok "ORCH_API kaydedildi"; break
+      fi
+      warn "Bu bir adres değil (https:// ile başlamalı). Token girmediğinizden emin olun."
+      tries=$((tries + 1))
+    done
   fi
 
   # Orchestrator Cloudflare Access arkasında: /health dışındaki her uç
@@ -666,7 +674,11 @@ cmd_doctor() {
       *)   warn "Task API → HTTP $code"; fail=1 ;;
     esac
   fi
-  if [ -n "${ORCH_API:-}" ]; then
+  if [ -n "${ORCH_API:-}" ] && ! is_url "$ORCH_API"; then
+    warn "ORCH_API bir adres değil — yanlışlıkla token yazılmış olabilir"
+    dim "düzeltmek için: omk setup  ya da $OMK_CONF_FILE içindeki ORCH_API satırı"
+    fail=1
+  elif [ -n "${ORCH_API:-}" ]; then
     code="$(http_ping "$ORCH_API$ORCH_HEALTH_PATH")"
     case "$code" in
       2??) ok "Orchestrator ($ORCH_API)"
