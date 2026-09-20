@@ -136,6 +136,9 @@ ask_plain() { # prompt
   printf '%s' "$val" | tr -d '[:space:]'
 }
 
+# Değer http(s) ile başlayan bir adres mi? (token yapıştırmalarını yakalar)
+is_url() { case "$1" in http://*|https://*) return 0 ;; *) return 1 ;; esac; }
+
 # Anahtar dosyada kayıtlı mı?
 has_kv() { [ -f "$1" ] && grep -q "^$2=" "$1"; }
 
