@@ -137,6 +137,27 @@ def cmd_register(argv):
         print("! deploy.yml içinde doldurulmamış alan: " + ", ".join(missing),
               file=sys.stderr)
         sys.exit(1)
+
+    # Orchestrator git_url'i HTTPS bekliyor; SSH biçimi kayıtta kabul edilse bile
+    # runner klonlarken başarısız olur
+    if not body["git_url"].startswith("https://"):
+        print("! git_url HTTPS olmalı (https://github.com/<kullanıcı>/<repo>.git): "
+              + body["git_url"], file=sys.stderr)
+        sys.exit(1)
+
+    runners = ("pi", "ubuntu", "macos")
+    if body["target_runner"] not in runners:
+        print("! target_runner şunlardan biri olmalı: " + ", ".join(runners),
+              file=sys.stderr)
+        sys.exit(1)
+
+    # repo_path mutlak yol olmalı: init onu kullanarak klonluyor
+    rp = body.get("repo_path")
+    if rp and not rp.startswith("/"):
+        print("! repo_path mutlak yol olmalı (ör. /home/omer/<proje>): " + rp,
+              file=sys.stderr)
+        sys.exit(1)
+
     print(json.dumps(body))
 
 
