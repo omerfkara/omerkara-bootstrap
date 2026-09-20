@@ -1,19 +1,18 @@
-# Orchestrator deploy tanımı — {{PROJECT}}
-# Tek tanım kaynağı: 'omk deploy' ve orchestrator kaydı bu dosyayı okur.
-# Not: yalnızca 'anahtar: değer' ve girintili eşlemeler kullanın; PyYAML'ı
-# olmayan makinelerde (Pi) yedek ayrıştırıcı liste sözdizimini desteklemez.
-project: {{PROJECT}}
-repo: {{GITHUB_REPO}}
-type: {{PTYPE}}
-runner: {{DEPLOY_RUNNER}}        # macos | ubuntu | pi
-branch: main
-trigger: push
+# Orchestrator proje tanımı — {{PROJECT}}
+# Tek tanım kaynağı: 'omk init' bunu POST /api/projects ile orchestrator'a kaydeder.
+# Not: yalnızca 'anahtar: değer' kullanın; PyYAML'ı olmayan makinelerde (Pi)
+# yedek ayrıştırıcı liste sözdizimini desteklemez — watch_paths virgülle ayrılır.
+name: {{PROJECT}}
+git_url: https://github.com/{{GITHUB_REPO}}.git
+target_runner: {{DEPLOY_RUNNER}}        # macos | ubuntu | pi
 
-environments:
-  staging:
-    branch: develop
-  production:
-    branch: main
-    approval: manual
+# Runner üzerinde çalışacak komutlar
+build_command: ""
+deploy_command: ""
 
+# Değişiklik bu yolların dışındaysa push deploy tetiklemez (boş = her değişiklik)
+watch_paths: ""
+
+# Deploy, main dalına push ile otomatik tetiklenir (orchestrator'ın GitHub App'i).
+# Elle tetikleme: omk deploy
 # Sertifika, SSH anahtarı ve store credential'ları orchestrator'da tutulur.

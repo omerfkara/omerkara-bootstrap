@@ -52,7 +52,7 @@ require_cmds() {
 }
 
 # Ortamdan gelen değerlerin dosyadakini ezmesi gereken anahtarlar
-OMK_OVERRIDABLE="TASK_TOKEN ORCH_TOKEN TASK_API TASK_MCP_URL ORCH_API ORCH_REGISTER_PATH ORCH_DEPLOY_PATH ORCH_HEALTH_PATH TASK_PROJECT"
+OMK_OVERRIDABLE="TASK_TOKEN ORCH_TOKEN TASK_API TASK_MCP_URL ORCH_API ORCH_REGISTER_PATH ORCH_DEPLOY_PATH ORCH_STATUS_PATH ORCH_LOGS_PATH ORCH_HEALTH_PATH CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET TASK_PROJECT"
 
 # Makine seviyesi credential ve config dosyalarını yükler.
 # Öncelik: ortam değişkeni > credentials > config > varsayılan.
@@ -82,9 +82,14 @@ load_credentials() {
   # Task MCP uzak sunucu, OAuth ile kimlik doğrular — .mcp.json'a token yazılmaz
   export TASK_MCP_URL="${TASK_MCP_URL:-https://tasks.omerkara.com/api/mcp}"
   export ORCH_API="${ORCH_API:-}"
-  export ORCH_REGISTER_PATH="${ORCH_REGISTER_PATH:-/projects}"
-  export ORCH_DEPLOY_PATH="${ORCH_DEPLOY_PATH:-/deployments}"
+  export ORCH_REGISTER_PATH="${ORCH_REGISTER_PATH:-/api/projects}"
+  export ORCH_DEPLOY_PATH="${ORCH_DEPLOY_PATH:-/api/deployments}"
+  export ORCH_STATUS_PATH="${ORCH_STATUS_PATH:-/api/status}"
+  export ORCH_LOGS_PATH="${ORCH_LOGS_PATH:-/api/logs}"
   export ORCH_HEALTH_PATH="${ORCH_HEALTH_PATH:-/health}"
+  # Orchestrator Cloudflare Access arkasında: Bearer'a ek olarak servis token'ı
+  export CF_ACCESS_CLIENT_ID="${CF_ACCESS_CLIENT_ID:-}"
+  export CF_ACCESS_CLIENT_SECRET="${CF_ACCESS_CLIENT_SECRET:-}"
 }
 
 # Değeri güvenli şekilde KEY=VALUE dosyasına yazar/günceller
@@ -188,14 +193,12 @@ orch_api() {
   m="$1"; p="$2"; body="${3:-}"
   [ -n "${ORCH_API:-}" ]   || { warn "ORCH_API tanımlı değil"; return 2; }
   [ -n "${ORCH_TOKEN:-}" ] || { warn "ORCH_TOKEN tanımlı değil"; return 2; }
-  if [ -n "$body" ]; then
-    curl -sS -X "$m" "$ORCH_API$p" -H "Authorization: Bearer $ORCH_TOKEN" \
-      -H "Content-Type: application/json" --data-binary "$body" \
-      -w '\n%{http_code}' --max-time "${ORCH_TIMEOUT:-30}"
-  else
-    curl -sS -X "$m" "$ORCH_API$p" -H "Authorization: Bearer $ORCH_TOKEN" \
-      -w '\n%{http_code}' --max-time "${ORCH_TIMEOUT:-30}"
-  fi
+  # Cloudflare Access servis token'ı varsa eklenir; /health dışındaki uçlar ister
+  set -- -sS -X "$m" "$ORCH_API$p" -H "Authorization: Bearer $ORCH_TOKEN"
+  [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && set -- "$@" -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID"
+  [ -n "${CF_ACCESS_CLIENT_SECRET:-}" ] && set -- "$@" -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
+  [ -n "$body" ] && set -- "$@" -H "Content-Type: application/json" --data-binary "$body"
+  curl "$@" -w '\n%{http_code}' --max-time "${ORCH_TIMEOUT:-30}"
 }
 
 # orch_api çıktısından HTTP kodunu / gövdeyi ayırır

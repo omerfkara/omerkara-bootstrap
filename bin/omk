@@ -33,6 +33,7 @@ Komutlar:
   omk update                Bootstrap, skill'ler ve task-mcp'yi günceller
   omk deploy [proje]        Orchestrator üzerinden deploy tetikler
   omk status [proje]        Son deployment'ları listeler
+  omk logs <id> [satır]     Bir deployment'ın logunu gösterir
   omk token [--task|--orch] Token'ı yeniler: sorar, doğrular, sonra kaydeder
   omk doctor [proje]        Bağımlılık, token ve API erişimini kontrol eder
   omk help
@@ -46,10 +47,9 @@ init opsiyonları:
   --dry-run                 Yapılacakları gösterir, değişiklik yapmaz
 
 deploy opsiyonları:
-  --env <ortam>             deploy.yml'deki ortam (ör. staging, production)
-  --ref <dal|commit>        Gönderilecek referans (varsayılan: ortamın branch'i)
-  --wait                    Bitene kadar durumu izle
-  --dry-run                 Gövdeyi göster, gönderme
+  --wait                    Bitene kadar durumu izle, hata halinde logu göster
+  --dry-run                 İsteği göster, gönderme
+  (deploy normalde main'e push ile tetiklenir; bu komut elle tetikler)
 
 token opsiyonları:
   --task                    TASK_TOKEN (varsayılan)
@@ -64,7 +64,8 @@ status opsiyonları:
 Ortam değişkenleri (opsiyonel):
   TASK_API, ORCH_API, ORCH_REGISTER_PATH, OMK_GITHUB_USER
   OMK_OP_TASK_TOKEN, OMK_OP_ORCH_TOKEN   1Password referansları (op://...)
-  ORCH_DEPLOY_PATH, ORCH_HEALTH_PATH     Orchestrator uç noktaları
+  ORCH_DEPLOY_PATH, ORCH_STATUS_PATH, ORCH_LOGS_PATH, ORCH_HEALTH_PATH
+  CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET   Cloudflare Access servis token'ı
 USAGE
 }
 
@@ -100,6 +101,13 @@ cmd_setup() {
     else
       dim "ORCH_API atlandı — deploy komutları devre dışı kalır"
     fi
+  fi
+
+  # Orchestrator Cloudflare Access arkasında: /health dışındaki her uç
+  # Bearer'a ek olarak servis token'ı istiyor
+  if [ -n "${ORCH_API:-}" ]; then
+    ensure_token CF_ACCESS_CLIENT_ID "CF_ACCESS_CLIENT_ID (orchestrator CF Access, boş geçilebilir)" OMK_OP_CF_ID no
+    ensure_token CF_ACCESS_CLIENT_SECRET "CF_ACCESS_CLIENT_SECRET (boş geçilebilir)" OMK_OP_CF_SECRET no
   fi
 
   install_skills
@@ -315,12 +323,10 @@ register_orchestrator() {
     return 0
   fi
   # Kayıt gövdesi deploy.yml'den üretilir: tek bir tanım kaynağı olsun
-  if [ -f deploy.yml ]; then
-    body="$(python3 "$BOOT_DIR/lib/orch.py" body deploy.yml)"
-  else
-    body="$(python3 -c 'import json,sys;print(json.dumps({"project":sys.argv[1],"type":sys.argv[2],"runner":sys.argv[3],"repo":sys.argv[4]}))' \
-      "$PROJECT" "$PTYPE" "$DEPLOY_RUNNER" "$GITHUB_REPO")"
-  fi
+  [ -f deploy.yml ] || { dim "deploy.yml yok, orchestrator kaydı atlandı"; return 0; }
+  body="$(python3 "$BOOT_DIR/lib/orch.py" register deploy.yml)" || {
+    warn "deploy.yml eksik — orchestrator kaydı atlandı"; return 0
+  }
   if [ "${DRY_RUN:-0}" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_REGISTER_PATH  $body"; return 0; fi
   resp="$(orch_api POST "$ORCH_REGISTER_PATH" "$body")" || { warn "Orchestrator kaydı yapılamadı"; return 0; }
   case "$(http_code_of "$resp")" in
@@ -375,11 +381,9 @@ find_deploy_yml() {
 }
 
 cmd_deploy() {
-  DEPLOY_ENV=""; DEPLOY_REF=""; WAIT=0; PROJECT=""
+  WAIT=0; PROJECT=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --env)     need_val --env $#; DEPLOY_ENV="$2"; shift 2 ;;
-      --ref)     need_val --ref $#; DEPLOY_REF="$2"; shift 2 ;;
       --wait)    WAIT=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       -h|--help) usage; return 0 ;;
@@ -391,20 +395,26 @@ cmd_deploy() {
   load_credentials
   [ -n "${ORCH_API:-}" ] || no_orch_api
 
-  yml="$(find_deploy_yml)" || die "deploy.yml bulunamadı. Proje klasöründe misiniz? (omk init ... --type <tip> ile oluşur)"
-  dim "tanım: $yml"
-  body="$(python3 "$BOOT_DIR/lib/orch.py" body "$yml" "$DEPLOY_REF" "$DEPLOY_ENV")"
-  [ -n "$PROJECT" ] && body="$(printf '%s' "$body" | python3 -c 'import json,sys;d=json.load(sys.stdin);d["project"]=sys.argv[1];print(json.dumps(d))' "$PROJECT")"
+  if [ -z "$PROJECT" ]; then
+    yml="$(find_deploy_yml)" || die "deploy.yml bulunamadı. Proje klasöründe misiniz? (omk init ... --type <tip> ile oluşur)"
+    dim "tanım: $yml"
+    PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" project "$yml")" || die "deploy.yml okunamadı"
+  fi
 
-  if [ "$DRY_RUN" = "1" ]; then dim "[dry-run] POST $ORCH_API$ORCH_DEPLOY_PATH"; echo "$body"; return 0; fi
+  # Orchestrator'da ayrı bir deploy ucu yok: normalde push + GitHub App tetikler.
+  # Elle tetikleme, projenin init ucuna deploy:true göndermekle yapılır.
+  path="$ORCH_REGISTER_PATH/$(urlencode "$PROJECT")/init"
+  if [ "$DRY_RUN" = "1" ]; then
+    dim "[dry-run] POST $ORCH_API$path"; echo '{"deploy": true}'; return 0
+  fi
 
-  info "Deploy tetikleniyor: $ORCH_API$ORCH_DEPLOY_PATH"
-  resp="$(orch_api POST "$ORCH_DEPLOY_PATH" "$body")" || die "Orchestrator'a ulaşılamadı"
+  info "Deploy tetikleniyor: $PROJECT"
+  resp="$(orch_api POST "$path" '{"deploy": true}')" || die "Orchestrator'a ulaşılamadı"
   code="$(http_code_of "$resp")"; out="$(http_body_of "$resp")"
   case "$code" in
     2??) ;;
-    401|403) die "Yetki reddedildi (HTTP $code) — ORCH_TOKEN geçersiz" ;;
-    404) die "Uç nokta bulunamadı: $ORCH_DEPLOY_PATH (ORCH_DEPLOY_PATH ile değiştirilebilir)" ;;
+    401|403) die "Yetki reddedildi (HTTP $code) — ORCH_TOKEN ya da CF Access servis token'ı geçersiz" ;;
+    404) die "Proje orchestrator'da kayıtlı değil: $PROJECT (önce: omk init $PROJECT --dir . --type <tip>)" ;;
     *) die "Deploy başlatılamadı (HTTP $code): $(printf '%s' "$out" | head -c 300)" ;;
   esac
   id="$(printf '%s' "$out" | python3 "$BOOT_DIR/lib/orch.py" field id 2>/dev/null || true)"
@@ -418,17 +428,37 @@ watch_deploy() {
   id="$1"; n=0; last=""
   info "Durum izleniyor (Ctrl-C ile çıkabilirsiniz)"
   while [ "$n" -lt "${OMK_WAIT_MAX:-120}" ]; do
-    resp="$(orch_api GET "$ORCH_DEPLOY_PATH/$id")" || { warn "durum okunamadı"; return 1; }
+    resp="$(orch_api GET "$ORCH_STATUS_PATH/$id")" || { warn "durum okunamadı"; return 1; }
     case "$(http_code_of "$resp")" in 2??) ;; *) warn "durum okunamadı (HTTP $(http_code_of "$resp"))"; return 1 ;; esac
     st="$(http_body_of "$resp" | python3 "$BOOT_DIR/lib/orch.py" field status 2>/dev/null || true)"
     [ "$st" != "$last" ] && { dim "durum: ${st:-bilinmiyor}"; last="$st"; }
     case "$st" in
       done|success|succeeded|completed|ok) ok "Deploy tamamlandı: $st"; return 0 ;;
-      failed|error|cancelled|canceled)     die "Deploy başarısız: $st" ;;
+      failed|error|cancelled|canceled)
+        warn "Deploy başarısız: $st"
+        show_deploy_log "$id"
+        exit 1 ;;
     esac
     n=$((n+1)); sleep "${OMK_WAIT_INTERVAL:-5}"
   done
-  warn "Zaman aşımı — orchestrator panelinden takip edin"
+  warn "Zaman aşımı — takip için: omk logs $id"
+}
+
+# Deploy logunun son satırlarını gösterir (düz metin döner)
+show_deploy_log() { # id [satir]
+  resp="$(orch_api GET "$ORCH_LOGS_PATH/$1")" || return 0
+  case "$(http_code_of "$resp")" in
+    2??) dim "--- log (son ${2:-30} satır) ---"
+         http_body_of "$resp" | tail -n "${2:-30}" ;;
+    *)   dim "log alınamadı (HTTP $(http_code_of "$resp"))" ;;
+  esac
+}
+
+cmd_logs() {
+  [ $# -ge 1 ] || die "Kullanım: omk logs <deployment-id> [satır]"
+  load_credentials
+  [ -n "${ORCH_API:-}" ] || no_orch_api
+  show_deploy_log "$1" "${2:-200}"
 }
 
 cmd_status() {
@@ -445,7 +475,7 @@ cmd_status() {
   load_credentials
   [ -n "${ORCH_API:-}" ] || no_orch_api
   if [ "$ALL" != "1" ] && [ -z "$PROJECT" ]; then
-    yml="$(find_deploy_yml)" && PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" body "$yml" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("project",""))')" || PROJECT=""
+    yml="$(find_deploy_yml)" && PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" project "$yml" 2>/dev/null)" || PROJECT=""
   fi
   q="?limit=$LIMIT"
   [ "$ALL" != "1" ] && [ -n "$PROJECT" ] && q="?project=$(urlencode "$PROJECT")&limit=$LIMIT"
@@ -639,7 +669,12 @@ cmd_doctor() {
   if [ -n "${ORCH_API:-}" ]; then
     code="$(http_ping "$ORCH_API$ORCH_HEALTH_PATH")"
     case "$code" in
-      2??) ok "Orchestrator ($ORCH_API)" ;;
+      2??) ok "Orchestrator ($ORCH_API)"
+           if [ -z "${CF_ACCESS_CLIENT_ID:-}" ] || [ -z "${CF_ACCESS_CLIENT_SECRET:-}" ]; then
+             warn "CF Access servis token'ı yok — /health dışındaki uçlar 403 döner"
+             dim "omk setup ile CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET girin"
+             fail=1
+           fi ;;
       000) warn "Orchestrator'a ulaşılamadı: $ORCH_API$ORCH_HEALTH_PATH"; fail=1 ;;
       *)   warn "Orchestrator $ORCH_HEALTH_PATH → HTTP $code"; fail=1 ;;
     esac
@@ -657,6 +692,7 @@ case "$cmd" in
   deploy) cmd_deploy "$@" ;;
   status) cmd_status "$@" ;;
   token)  cmd_token "$@" ;;
+  logs)   cmd_logs "$@" ;;
   update) cmd_update "$@" ;;
   doctor) cmd_doctor "$@" ;;
   help|-h|--help) usage ;;

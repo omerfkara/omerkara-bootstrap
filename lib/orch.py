@@ -2,7 +2,8 @@
 """Orchestrator yardımcıları — harici bağımlılık yok (PyYAML varsa kullanılır).
 
 Kullanım:
-  orch.py body   deploy.yml [ref] [env]   → kayıt/deploy gövdesi (JSON)
+  orch.py register deploy.yml           → POST /api/projects gövdesi (JSON)
+  orch.py project  deploy.yml           → proje adı
   orch.py table  < yanit.json             → deployment listesini tablo olarak yaz
   orch.py field  <ad> < yanit.json        → tek alanı yaz (id, status ...)
 
@@ -96,31 +97,46 @@ def parse_yaml(path):
     return root
 
 
-def cmd_body(argv):
-    """deploy.yml → orchestrator'a gönderilecek JSON gövde.
+def cmd_register(argv):
+    """deploy.yml → POST /api/projects gövdesi.
 
-    ref önceliği: komut satırı > ortamın branch'i > deploy.yml branch > main
+    Orchestrator'ın beklediği alanlar: name, git_url, target_runner,
+    build_command, deploy_command (+ watch_paths, environment, notifications).
+    Göndermediğimiz alanlar orchestrator tarafında korunuyor, bu yüzden boş
+    değerler gövdeye hiç konmaz.
     """
     spec = parse_yaml(argv[0])
-    explicit_ref = argv[1] if len(argv) > 1 and argv[1] else ""
-    env = argv[2] if len(argv) > 2 and argv[2] else ""
+    body = {}
+    for key in ("name", "git_url", "target_runner", "build_command",
+                "deploy_command", "environment", "notifications"):
+        val = spec.get(key)
+        if isinstance(val, str) and val.strip():
+            body[key] = val.strip()
+        elif val not in (None, "", {}, []):
+            body[key] = val
 
-    env_branch = ""
-    envs = spec.get("environments")
-    if env and isinstance(envs, dict) and isinstance(envs.get(env), dict):
-        env_branch = envs[env].get("branch") or ""
+    # watch_paths: mini ayrıştırıcı liste bilmediği için virgülle ayrılmış yazılır
+    wp = spec.get("watch_paths")
+    if isinstance(wp, str) and wp.strip():
+        body["watch_paths"] = [p.strip() for p in wp.split(",") if p.strip()]
+    elif isinstance(wp, list) and wp:
+        body["watch_paths"] = wp
 
-    body = {
-        "project": spec.get("project", ""),
-        "repo": spec.get("repo", ""),
-        "type": spec.get("type", ""),
-        "runner": spec.get("runner", ""),
-        "ref": explicit_ref or env_branch or spec.get("branch") or "main",
-        "trigger": "cli",
-    }
-    if env:
-        body["environment"] = env
-    print(json.dumps({k: v for k, v in body.items() if v != ""}))
+    missing = [k for k in ("name", "git_url", "target_runner") if not body.get(k)]
+    if missing:
+        print("! deploy.yml eksik alan: " + ", ".join(missing), file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(body))
+
+
+def cmd_project(argv):
+    """deploy.yml'deki proje adını yazar (URL'de kullanılır)."""
+    spec = parse_yaml(argv[0])
+    name = spec.get("name") or ""
+    if not name:
+        print("! deploy.yml içinde 'name' yok", file=sys.stderr)
+        sys.exit(1)
+    print(name)
 
 
 def cmd_table(argv):
@@ -150,7 +166,8 @@ def main():
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     mode, argv = sys.argv[1], sys.argv[2:]
-    handlers = {"body": cmd_body, "table": cmd_table, "field": cmd_field}
+    handlers = {"register": cmd_register, "project": cmd_project,
+                "table": cmd_table, "field": cmd_field}
     if mode not in handlers:
         print(f"bilinmeyen mod: {mode}", file=sys.stderr)
         sys.exit(2)
