@@ -2,7 +2,7 @@
 
 Her makinede tek komutla proje ortamı hazırlar:
 
-- **Task API** (tasks.omerkara.com / n8n) için token ve skill
+- **Task API** (`https://tasks.omerkara.com/api/v1`) için token ve skill
 - **Task MCP** (`https://tasks.omerkara.com/api/mcp`, OAuth) için `.mcp.json`
 - **Orchestrator** için deploy tanımı ve proje kaydı
 - **Claude Code** için `CLAUDE.md`, `.mcp.json` ve `.claude/settings.json`
@@ -101,7 +101,7 @@ Komut tekrar çalıştırılabilir; her çalıştırmada eksik olanı tamamlar.
 
 | Değişken | Varsayılan | Açıklama |
 | :--- | :--- | :--- |
-| `TASK_API` | `https://n8n.omerkara.com/webhook` | Task API adresi (HTTP, `X-Task-Token`) |
+| `TASK_API` | `https://tasks.omerkara.com/api/v1` | Task API adresi (HTTP, `X-Task-Token`). Eski n8n adresi (`n8n.omerkara.com/webhook`) kayıtlıysa `omk setup` / `omk doctor --fix` yenisine çevirir |
 | `TASK_MCP_URL` | `https://tasks.omerkara.com/api/mcp` | Task MCP adresi (OAuth) |
 | `ORCH_API` | – | Orchestrator adresi (örn. `https://orchestrator.omerkara.com`) |
 | `ORCH_REGISTER_PATH` | `/api/projects` | Proje kaydı ve init ucu |

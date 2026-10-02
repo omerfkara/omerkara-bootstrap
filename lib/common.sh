@@ -51,6 +51,12 @@ require_cmds() {
   fi
 }
 
+# Task API 2026-10-02'de n8n webhook'larından tasks.omerkara.com'a taşındı;
+# yollar ve yanıt biçimi aynı. Eski adres kapatılana kadar çalışır ama
+# kayıtlı config'de görülürse yenisine çevrilir (doctor --fix / setup).
+TASK_API_DEFAULT="https://tasks.omerkara.com/api/v1"
+TASK_API_LEGACY="https://n8n.omerkara.com/webhook"
+
 # Ortamdan gelen değerlerin dosyadakini ezmesi gereken anahtarlar
 OMK_OVERRIDABLE="TASK_TOKEN ORCH_TOKEN TASK_API TASK_MCP_URL ORCH_API ORCH_REGISTER_PATH ORCH_DEPLOY_PATH ORCH_STATUS_PATH ORCH_LOGS_PATH ORCH_HEALTH_PATH CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET TASK_PROJECT"
 
@@ -77,7 +83,7 @@ load_credentials() {
     fi
   done
   unset _v
-  export TASK_API="${TASK_API:-https://n8n.omerkara.com/webhook}"
+  export TASK_API="${TASK_API:-$TASK_API_DEFAULT}"
   export TASK_SPEC_URL="${TASK_SPEC_URL:-https://tasks.omerkara.com/task-management.md}"
   # Task MCP uzak sunucu, OAuth ile kimlik doğrular — .mcp.json'a token yazılmaz
   export TASK_MCP_URL="${TASK_MCP_URL:-https://tasks.omerkara.com/api/mcp}"
