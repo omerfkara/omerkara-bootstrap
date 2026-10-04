@@ -209,3 +209,13 @@ templates/         proje şablonları ({{PROJECT}} gibi yer tutucular)
 skills.txt         kurulacak skill'ler
 install.sh         curl | bash giriş noktası
 ```
+
+## Geliştirme
+
+```bash
+shellcheck -S error bin/omk lib/common.sh install.sh tests/test_common.sh
+python3 -m unittest discover -s tests -v   # lib/orch.py (kayıt gövdesi, status tablosu, env gövdesi)
+bash tests/test_common.sh                  # lib/common.sh (CF token temizleme, HTTP yardımcıları)
+```
+
+Aynı üçü her push'ta GitHub Actions'ta (`.github/workflows/ci.yml`) koşar.
