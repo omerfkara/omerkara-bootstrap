@@ -218,7 +218,15 @@ cmd_init() {
     esac
   done
   export DRY_RUN="${DRY_RUN:-0}"
-  [ -n "$PROJECT" ] || { usage; die "Proje adı gerekli."; }
+  # Proje dizininde argümansız: adı deploy.yml'den al, dizin burası (#511)
+  if [ -z "$PROJECT" ] && [ -f "${DIR:-.}/deploy.yml" ]; then
+    PROJECT="$(python3 "$BOOT_DIR/lib/orch.py" project "${DIR:-.}/deploy.yml" 2>/dev/null || true)"
+    if [ -n "$PROJECT" ]; then
+      DIR="${DIR:-$PWD}"
+      dim "proje deploy.yml'den: $PROJECT ($DIR)"
+    fi
+  fi
+  [ -n "$PROJECT" ] || die "Proje adı gerekli: omk init <ad> [--dir <dizin>]  (proje dizinindeysen deploy.yml'deki 'name' kullanılır)"
   echo "$PROJECT" | grep -Eq '^[a-z0-9][a-z0-9-]{1,48}$' \
     || die "Geçersiz proje adı '$PROJECT' (küçük harf, rakam ve '-', 2-49 karakter)"
 
