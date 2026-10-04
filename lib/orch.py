@@ -20,11 +20,12 @@ import sys
 FIELDS = {
     "id":        ("id", "deployment_id", "uuid", "pk"),
     "project":   ("project", "project_name", "name"),
-    "server":    ("server", "runner", "target", "host", "machine"),
+    "server":    ("server", "target_runner", "runner", "target", "host", "machine"),
     "status":    ("status", "state", "result"),
     "trigger":   ("trigger", "triggered_by", "source", "event"),
     "timestamp": ("timestamp", "created_at", "started_at", "finished_at", "updated_at"),
     "ref":       ("ref", "branch", "commit", "sha"),
+    "sha":       ("git_sha", "sha", "commit"),
     "url":       ("url", "log_url", "link"),
 }
 
@@ -208,8 +209,13 @@ def cmd_table(argv):
     if not data:
         print("  kayıt yok")
         return
-    cols = ("project", "server", "status", "trigger", "timestamp")
-    table = [[str(pick(r, c)) for c in cols] for r in data]
+    cols = ("id", "project", "server", "status", "trigger", "sha", "timestamp")
+    table = []
+    for r in data:
+        row = [str(pick(r, c)) for c in cols]
+        row[5] = row[5][:7]  # kısa SHA
+        row[6] = row[6][:19].replace("T", " ")  # saniyeye kadar, UTC
+        table.append(row)
     widths = [max(len(c), *(len(r[i]) for r in table)) for i, c in enumerate(cols)]
     fmt = "  ".join("{:<%d}" % w for w in widths)
     print("  " + fmt.format(*(c.upper() for c in cols)))

@@ -137,6 +137,17 @@ ensure_token() { # var prompt op_ref_var required
     [ "$4" = "yes" ] && die "$1 alınamadı. Etkileşimsiz kurulumda ortam değişkeni olarak verin: $1=... omk setup"
     dim "$1 atlandı"; return 0
   fi
+  case "$1" in
+    CF_ACCESS_CLIENT_ID|CF_ACCESS_CLIENT_SECRET)
+      clean="$(cf_normalize "$t")"
+      [ "$clean" != "$t" ] && dim "$1: başlık öneki / çift yapıştırma temizlendi"
+      t="$clean"
+      if [ "$1" = CF_ACCESS_CLIENT_ID ] && ! cf_id_valid "$t"; then
+        warn "CF_ACCESS_CLIENT_ID biçimi beklenmiyor (32 hex + .access, ${#t} karakter geldi) — kaydedilmedi"
+        dim "Zero Trust → Access → Service Auth → token → Client ID'yi tek kez kopyalayın"
+        return 0
+      fi ;;
+  esac
   run set_kv "$OMK_CRED_FILE" "$1" "$t"; export "$1=$t"
   ok "$1 kaydedildi ($OMK_CRED_FILE, chmod 600)"
 }
@@ -900,6 +911,19 @@ cmd_doctor() {
              warn "CF Access servis token'ı yok — /health dışındaki uçlar 403 döner"
              dim "omk setup ile CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET girin"
              fail=1
+           else
+             if ! cf_id_valid "$CF_ACCESS_CLIENT_ID"; then
+               warn "CF_ACCESS_CLIENT_ID biçimi beklenmiyor (32 hex + .access; ${#CF_ACCESS_CLIENT_ID} karakter)"
+               fixed="$(cf_normalize "$CF_ACCESS_CLIENT_ID")"
+               cf_id_valid "$fixed" && dim "başlık öneki ya da çift yapıştırma var; doğru değer ${#fixed} karakter → $OMK_CRED_FILE"
+               fail=1
+             fi
+             # /health Access dışında: asıl yetkiyi korumalı bir uçla dene (#510).
+             resp="$(orch_api GET "$ORCH_REGISTER_PATH" 2>/dev/null)"; code="$(http_code_of "$resp")"
+             case "$code" in
+               2??) ok "Orchestrator API yetkisi (CF Access + ORCH_TOKEN)" ;;
+               *)   orch_explain "${code:-000}"; fail=1 ;;
+             esac
            fi ;;
       000) warn "Orchestrator'a ulaşılamadı: $ORCH_API$ORCH_HEALTH_PATH"; fail=1 ;;
       *)   warn "Orchestrator $ORCH_HEALTH_PATH → HTTP $code"; fail=1 ;;

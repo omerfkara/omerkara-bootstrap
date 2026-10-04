@@ -132,6 +132,24 @@ read_secret() { # var_name prompt op_ref_var
   printf '%s' "$val"
 }
 
+# Yapıştırılan CF Access değerini temizler: Cloudflare panelinden kopyalanan
+# "CF-Access-Client-Id: …" başlık biçimini ve iki kez yapıştırılmış değeri
+# (#510: 78 karakterlik ID, geçerli değerin iki kopyası çıktı) düzeltir.
+cf_normalize() { # value
+  python3 - "$1" <<'PY'
+import re, sys
+v = sys.argv[1].strip()
+v = re.sub(r"^cf-access-client-(id|secret)\s*:\s*", "", v, flags=re.I).strip()
+h = len(v) // 2
+if len(v) % 2 == 0 and h and v[:h] == v[h:]:
+    v = v[:h]
+print(v, end="")
+PY
+}
+
+# CF Access client ID biçimi: 32 hex + ".access". Secret'ın biçimi sabit değil (#510).
+cf_id_valid() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{32}\.access$'; }
+
 # Gizli olmayan bir değer sorar (URL vb.). Boş geçilebilir.
 ask_plain() { # prompt
   val=""
