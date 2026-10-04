@@ -34,6 +34,7 @@ Komutlar:
   omk deploy [proje]        Orchestrator üzerinden deploy tetikler
   omk status [proje]        Son deployment'ları listeler
   omk logs <id> [satır]     Bir deployment'ın logunu gösterir
+  omk --version             Kurulu omk commit'ini gösterir
   omk token [--task|--orch] Token'ı yeniler: sorar, doğrular, sonra kaydeder
   omk doctor [--fix] [proje]  Config ve erişimi kontrol eder; --fix onarır
   omk help
@@ -950,6 +951,10 @@ case "$cmd" in
   logs)   cmd_logs "$@" ;;
   update) cmd_update "$@" ;;
   doctor) cmd_doctor "$@" ;;
+  version|-v|--version)
+    # Kurulu commit: makineler arası sürüm farkını görmek için (#375)
+    git -C "$BOOT_DIR" log -1 --format='omk %h (%ad) %s' --date=short 2>/dev/null \
+      || echo "omk (git dışı kurulum: $BOOT_DIR)" ;;
   help|-h|--help) usage ;;
   *) usage; die "Bilinmeyen komut: $cmd" ;;
 esac
