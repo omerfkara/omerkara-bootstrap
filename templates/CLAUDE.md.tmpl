@@ -22,15 +22,15 @@ Bu dosya `omk init` ile oluşturuldu ({{CREATED_AT}}). Proje tipi: **{{PTYPE}}**
 Deploy işlemleri **yalnızca orchestrator** üzerinden yapılır; bu repoda fastlane, sertifika veya SSH anahtarı tutulmaz.
 
 - Tanım dosyası: `deploy.yml` — runner `{{DEPLOY_RUNNER}}`. Orchestrator kaydı ve CLI komutları bu dosyayı okur, ikinci bir yerde tekrarlama.
-- Tetikleme (CLI):
-  - `omk deploy --env staging` — staging ortamına deploy
-  - `omk deploy --env production --wait` — bitene kadar durumu izler
-  - `omk deploy --ref <dal|commit>` — belirli bir referansı gönderir
-  - `omk deploy --dry-run` — gövdeyi gösterir, göndermez
-- Durum: `omk status` (bu proje) · `omk status --all -n 20` (tüm projeler)
-- Otomatik tetikleme: `main` dalına push → GitHub webhook → orchestrator.
-- Deploy hedefi, runner ya da ortam değiştiğinde `deploy.yml`'i güncelle **ve** değişikliği `DEPLOYMENT` dokümanına `POST /documents/upsert` ile yansıt.
-- Deploy başarısızsa logu orchestrator panelinden oku; sertifika/secret sorunlarını bu repoda çözmeye çalışma, orchestrator tarafına aittir.
+- Otomatik tetikleme: `main` dalına push → GitHub webhook → orchestrator. Normal yol budur.
+- Elle tetikleme (CLI) her zaman `main`'in son halini deploy eder; ortam (staging/production) ya da ref seçimi yoktur:
+  - `omk deploy --wait` — deploy'u başlatır, bitene kadar izler, hata olursa logu basar
+  - `omk deploy --dry-run` — isteği gösterir, göndermez
+  - `omk deploy {{PROJECT}} --wait` — `deploy.yml` bulunamazsa proje adını açıkça ver
+  - `omk deploy --env .env` — **ortam seçmez**: dosyadaki değişkenleri orchestrator vault'una yazar, sonra deploy eder. Yalnızca env değerleri değiştiğinde kullan.
+- Durum ve log: `omk status` (bu proje) · `omk status --all -n 20` (tüm projeler) · `omk logs <id>`
+- Deploy hedefi ya da runner değiştiğinde `deploy.yml`'i güncelle **ve** değişikliği `DEPLOYMENT` dokümanına `POST /documents/upsert` ile yansıt.
+- Deploy başarısızsa logu `omk logs <id>` ya da orchestrator panelinden oku; sertifika/secret sorunlarını bu repoda çözmeye çalışma, orchestrator tarafına aittir.
 
 ## Güvenlik
 - Token ve parolalar asla commit edilmez. Makine credential'ları `~/.config/omerkara/credentials` içindedir.

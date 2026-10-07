@@ -521,6 +521,15 @@ cmd_deploy() {
     esac
   done
   export DRY_RUN="${DRY_RUN:-0}"
+  # --env bir dosya alır, ortam seçmez (#681). Kayıttan ve dry-run'dan önce kontrol et.
+  if [ -n "$ENV_FILE" ] && [ ! -f "$ENV_FILE" ]; then
+    case "$ENV_FILE" in
+      staging|production|prod|dev|development)
+        die "--env ortam seçmez, vault'a yazılacak env dosyasını alır; '$ENV_FILE' diye bir dosya yok.
+Ortam seçimi yok: 'omk deploy --wait' main'in son halini deploy eder." ;;
+      *) die "env dosyası yok: $ENV_FILE" ;;
+    esac
+  fi
   load_credentials
   orch_preflight
 
