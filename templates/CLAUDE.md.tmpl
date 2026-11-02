@@ -23,8 +23,11 @@ Deploy işlemleri **yalnızca orchestrator** üzerinden yapılır; bu repoda fas
 
 - Tanım dosyası: `deploy.yml` — runner `{{DEPLOY_RUNNER}}`. Orchestrator kaydı ve CLI komutları bu dosyayı okur, ikinci bir yerde tekrarlama.
 - Otomatik tetikleme: `main` dalına push → GitHub webhook → orchestrator. Normal yol budur.
-- Elle tetikleme (CLI) her zaman `main`'in son halini deploy eder; ortam (staging/production) ya da ref seçimi yoktur:
-  - `omk deploy --wait` — deploy'u başlatır, bitene kadar izler, hata olursa logu basar
+  Push sonrası **izlemek için** `omk status` / `omk logs <id>` kullan; push'un hemen ardından
+  `omk deploy` çalıştırma — webhook kaydının yanına ikinci bir `init` kaydı açar ve aynı build'i
+  iki kez koşturur (orchestrator #1127).
+- Elle tetikleme (CLI) yalnız webhook düşmediğinde ya da aynı commit'i yeniden yayınlamak gerektiğinde; her zaman `main`'in son halini deploy eder, ortam (staging/production) ya da ref seçimi yoktur:
+  - `omk deploy --wait` — deploy'u elle başlatır, bitene kadar izler, hata olursa logu basar
   - `omk deploy --dry-run` — isteği gösterir, göndermez
   - `omk deploy {{PROJECT}} --wait` — `deploy.yml` bulunamazsa proje adını açıkça ver
   - `omk deploy --env .env` — **ortam seçmez**: dosyadaki değişkenleri orchestrator vault'una yazar, sonra deploy eder. Yalnızca env değerleri değiştiğinde kullan.

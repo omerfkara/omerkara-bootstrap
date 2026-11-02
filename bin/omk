@@ -53,7 +53,9 @@ deploy opsiyonları:
   --dry-run                 İsteği göster, gönderme
   --ios-bootstrap           match'i TEK SEFERLİK yazma modunda çalıştırır
                             (yeni bir bundle id'ye profil üretir; yalnızca macos)
-  (deploy normalde main'e push ile tetiklenir; bu komut elle tetikler)
+  (deploy normalde main'e push ile tetiklenir; bu komut elle tetikler. Push'tan hemen
+   sonra çalıştırma: webhook kaydının yanına ikinci bir init kaydı açar, aynı build iki
+   kez koşar — izlemek için 'omk status' / 'omk logs <id>' kullan; orchestrator #1127)
   (proje orchestrator'da kayıtlı değilse deploy.yml'den kaydeder ve bekler)
 
 token opsiyonları:
